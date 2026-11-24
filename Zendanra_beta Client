@@ -1,0 +1,1501 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local Stats = game:GetService("Stats")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+
+if not RunService:IsClient() then
+	warn("[Zendanra UI] Script này chỉ chạy ở phía Client (RunContext = Client).")
+	return
+end
+
+local player = Players.LocalPlayer
+if not player then
+	Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+	player = Players.LocalPlayer
+end
+
+local playerGui = player:WaitForChild("PlayerGui")
+local GUI_NAME = "ZendanraModernUI"
+
+local existingGui = playerGui:FindFirstChild(GUI_NAME)
+if existingGui then
+	existingGui:Destroy()
+end
+
+local function safeCall(context, fn, ...)
+	local ok, err = xpcall(fn, debug.traceback, ...)
+	if not ok then
+		warn(string.format("[Zendanra UI][%s] Lỗi: %s", tostring(context), tostring(err)))
+	end
+	return ok, err
+end
+
+local R6_PAIRS = {
+	{ "Head", "Torso" },
+	{ "Torso", "Left Arm" },
+	{ "Torso", "Right Arm" },
+	{ "Torso", "Left Leg" },
+	{ "Torso", "Right Leg" },
+}
+
+local R15_PAIRS = {
+	{ "Head", "UpperTorso" },
+	{ "UpperTorso", "LowerTorso" },
+	{ "UpperTorso", "LeftUpperArm" },
+	{ "LeftUpperArm", "LeftLowerArm" },
+	{ "LeftLowerArm", "LeftHand" },
+	{ "UpperTorso", "RightUpperArm" },
+	{ "RightUpperArm", "RightLowerArm" },
+	{ "RightLowerArm", "RightHand" },
+	{ "LowerTorso", "LeftUpperLeg" },
+	{ "LeftUpperLeg", "LeftLowerLeg" },
+	{ "LeftLowerLeg", "LeftFoot" },
+	{ "LowerTorso", "RightUpperLeg" },
+	{ "RightUpperLeg", "RightLowerLeg" },
+	{ "RightLowerLeg", "RightFoot" },
+}
+
+local LogicController = {
+	stepName = "ZendanraClientDebug_" .. HttpService:GenerateGUID(false),
+	graceRemaining = 0,
+	activeSubject = nil,
+}
+
+function LogicController:getRigPairs(character)
+	if not character then
+		return nil
+	end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return nil
+	end
+	if humanoid.RigType == Enum.HumanoidRigType.R6 then
+		return R6_PAIRS
+	end
+	return R15_PAIRS
+end
+
+function LogicController:collectWorldEntities(includeLocal)
+	local list = {}
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if includeLocal or plr ~= player then
+			local char = plr.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if char and root and hum and hum.Health > 0 then
+				table.insert(list, {
+					player = plr,
+					character = char,
+					root = root,
+					humanoid = hum,
+				})
+			end
+		end
+	end
+	return list
+end
+
+function LogicController:getDisplayEntities()
+	return self:collectWorldEntities(true)
+end
+
+function LogicController:getSelectableEntities()
+	return self:collectWorldEntities(false)
+end
+
+function LogicController:projectWorldPoint(worldPos)
+	local camera = workspace.CurrentCamera
+	if not camera or typeof(worldPos) ~= "Vector3" then
+		return Vector2.zero, false, 0
+	end
+	local viewportPos, onScreen = camera:WorldToViewportPoint(worldPos)
+	local screenPos = Vector2.new(viewportPos.X, viewportPos.Y)
+	local valid = onScreen and viewportPos.Z > 0
+	return screenPos, valid, viewportPos.Z
+end
+
+function LogicController:updateSubjectState(dt, isSubjectValid)
+	if isSubjectValid then
+		self.graceRemaining = 0.25
+		return true
+	end
+	if self.graceRemaining > 0 then
+		self.graceRemaining = math.max(0, self.graceRemaining - dt)
+		return true
+	end
+	self.activeSubject = nil
+	return false
+end
+
+function LogicController:handleInputBegan(input, gameProcessed)
+	if gameProcessed then
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.F4 then
+		self.activeSubject = nil
+		self.graceRemaining = 0
+	end
+end
+
+function LogicController:bind(onTick)
+	self:unbind()
+	RunService:BindToRenderStep(self.stepName, Enum.RenderPriority.Camera.Value + 1, function(dt)
+		if typeof(onTick) == "function" then
+			safeCall("LogicControllerTick", onTick, dt, self)
+		end
+	end)
+end
+
+function LogicController:unbind()
+	pcall(function()
+		RunService:UnbindFromRenderStep(self.stepName)
+	end)
+end
+
+local ResourceManager = {
+	alive = true,
+	connections = {},
+	tweens = {},
+	updaters = {},
+}
+
+function ResourceManager:connect(signal, callback, context)
+	if not self.alive then return nil end
+	local conn = signal:Connect(function(...)
+		if self.alive then
+			safeCall(context or "Signal", callback, ...)
+		end
+	end)
+	table.insert(self.connections, conn)
+	return conn
+end
+
+function ResourceManager:trackTween(tweenObj)
+	if not tweenObj then return nil end
+	self.tweens[tweenObj] = true
+	tweenObj.Completed:Once(function()
+		self.tweens[tweenObj] = nil
+	end)
+	return tweenObj
+end
+
+function ResourceManager:cleanup()
+	if not self.alive then return end
+	self.alive = false
+
+	LogicController:unbind()
+
+	for _, conn in ipairs(self.connections) do
+		if conn.Connected then
+			conn:Disconnect()
+		end
+	end
+	table.clear(self.connections)
+
+	for tweenObj in pairs(self.tweens) do
+		pcall(function()
+			tweenObj:Cancel()
+		end)
+		self.tweens[tweenObj] = nil
+	end
+
+	table.clear(self.updaters)
+end
+
+local BASE_COLORS = {
+	background = Color3.fromRGB(12, 16, 20),
+	surface = Color3.fromRGB(19, 25, 31),
+	surface2 = Color3.fromRGB(26, 34, 41),
+	surface3 = Color3.fromRGB(34, 44, 52),
+	text = Color3.fromRGB(239, 245, 246),
+	muted = Color3.fromRGB(145, 160, 166),
+	danger = Color3.fromRGB(235, 95, 95),
+	stroke = Color3.fromRGB(48, 65, 69),
+}
+
+local THEMES = {
+	Emerald = {
+		accent = Color3.fromRGB(45, 210, 155),
+		accentDark = Color3.fromRGB(25, 135, 104),
+	},
+	Blue = {
+		accent = Color3.fromRGB(85, 155, 255),
+		accentDark = Color3.fromRGB(48, 100, 190),
+	},
+	Violet = {
+		accent = Color3.fromRGB(174, 125, 255),
+		accentDark = Color3.fromRGB(112, 72, 185),
+	},
+	Crimson = {
+		accent = Color3.fromRGB(245, 100, 115),
+		accentDark = Color3.fromRGB(170, 55, 75),
+	},
+}
+
+local LOCALE = {
+	VI = {
+		dashboard = "Tổng quan",
+		diagnostics = "Kiểm thử",
+		appearance = "Giao diện",
+		settings = "Cài đặt",
+		welcome = "Xin chào!",
+		subtitle = "Không gian điều khiển & kiểm thử game",
+		status = "TRẠNG THÁI HỆ THỐNG",
+		ready = "Giao diện đã sẵn sàng",
+		playerCount = "Người chơi trong máy chủ",
+		quick = "THAO TÁC NHANH",
+		diagTitle = "Công cụ Debug & Hiệu năng",
+		diagDesc = "Thông số thời gian thực của client và nhân vật.",
+		fpsLabel = "Tốc độ khung hình (FPS)",
+		pingLabel = "Độ trễ mạng (Ping)",
+		rigLabel = "Cấu trúc nhân vật",
+		screenLabel = "Màn hình & Tỷ lệ hiển thị",
+		appearanceTitle = "Tùy chỉnh giao diện",
+		appearanceDesc = "Thay đổi màu sắc và kích thước theo thiết bị.",
+		theme = "Màu chủ đạo",
+		scale = "Kích thước giao diện",
+		language = "Ngôn ngữ",
+		settingsTitle = "Cài đặt chung",
+		settingsDesc = "Tự động lưu trên phiên chơi hiện tại.",
+		animation = "Hiệu ứng chuyển động",
+		compact = "Chế độ gọn",
+		reset = "Khôi phục mặc định",
+		on = "BẬT",
+		off = "TẮT",
+		saved = "Đã lưu cài đặt",
+		resetDone = "Đã khôi phục mặc định",
+		footer = "ZENDANRA  •  DEV & DIAGNOSTICS UI",
+		themeChanged = "Đã đổi màu giao diện",
+	},
+	EN = {
+		dashboard = "Dashboard",
+		diagnostics = "Diagnostics",
+		appearance = "Appearance",
+		settings = "Settings",
+		welcome = "Welcome!",
+		subtitle = "Game control & diagnostics workspace",
+		status = "SYSTEM STATUS",
+		ready = "Interface is ready",
+		playerCount = "Players in server",
+		quick = "QUICK ACTIONS",
+		diagTitle = "Debug & Performance Monitor",
+		diagDesc = "Real-time client and character diagnostics.",
+		fpsLabel = "Frame Rate (FPS)",
+		pingLabel = "Network Latency (Ping)",
+		rigLabel = "Character Rig Type",
+		screenLabel = "Viewport & Effective Scale",
+		appearanceTitle = "Customize interface",
+		appearanceDesc = "Adjust colors and scale for your device.",
+		theme = "Accent color",
+		scale = "Interface scale",
+		language = "Language",
+		settingsTitle = "General settings",
+		settingsDesc = "Automatically persisted for this session.",
+		animation = "Transition effects",
+		compact = "Compact mode",
+		reset = "Reset to default",
+		on = "ON",
+		off = "OFF",
+		saved = "Settings saved",
+		resetDone = "Restored to default",
+		footer = "ZENDANRA  •  DEV & DIAGNOSTICS UI",
+		themeChanged = "Theme color changed",
+	},
+}
+
+local State = {
+	language = "VI",
+	theme = "Emerald",
+	uiScale = 1.0,
+	currentTab = "Dashboard",
+	collapsed = false,
+	compact = false,
+	animations = true,
+	hasCustomPosition = false,
+}
+
+local function loadPersistedState()
+	local savedLang = player:GetAttribute("Zendanra_Lang")
+	if savedLang and LOCALE[savedLang] then
+		State.language = savedLang
+	end
+
+	local savedTheme = player:GetAttribute("Zendanra_Theme")
+	if savedTheme and THEMES[savedTheme] then
+		State.theme = savedTheme
+	end
+
+	local savedScale = player:GetAttribute("Zendanra_Scale")
+	if typeof(savedScale) == "number" then
+		State.uiScale = math.clamp(savedScale, 0.82, 1.12)
+	end
+
+	local savedAnim = player:GetAttribute("Zendanra_Anim")
+	if typeof(savedAnim) == "boolean" then
+		State.animations = savedAnim
+	end
+
+	local savedCompact = player:GetAttribute("Zendanra_Compact")
+	if typeof(savedCompact) == "boolean" then
+		State.compact = savedCompact
+	end
+end
+
+local function savePersistedState()
+	player:SetAttribute("Zendanra_Lang", State.language)
+	player:SetAttribute("Zendanra_Theme", State.theme)
+	player:SetAttribute("Zendanra_Scale", State.uiScale)
+	player:SetAttribute("Zendanra_Anim", State.animations)
+	player:SetAttribute("Zendanra_Compact", State.compact)
+end
+
+local function tr(key)
+	local dict = LOCALE[State.language] or LOCALE.VI
+	return dict[key] or key
+end
+
+local function getAccent()
+	return THEMES[State.theme] or THEMES.Emerald
+end
+
+local accentListeners = {}
+local languageListeners = {}
+
+local function onThemeChange(fn)
+	table.insert(accentListeners, fn)
+end
+
+local function onLanguageChange(fn)
+	table.insert(languageListeners, fn)
+end
+
+local function playTween(object, duration, properties)
+	if not State.animations or duration <= 0 then
+		for key, value in pairs(properties) do
+			object[key] = value
+		end
+		return nil
+	end
+	local info = TweenInfo.new(duration, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+	local animation = TweenService:Create(object, info, properties)
+	ResourceManager:trackTween(animation)
+	animation:Play()
+	return animation
+end
+
+local function make(className, properties, parent)
+	local object = Instance.new(className)
+	for key, value in pairs(properties or {}) do
+		object[key] = value
+	end
+	object.Parent = parent
+	return object
+end
+
+local function addCorner(parent, radius)
+	return make("UICorner", { CornerRadius = UDim.new(0, radius or 10) }, parent)
+end
+
+local function addStroke(parent, color, thickness, transparency)
+	return make("UIStroke", {
+		Color = color or BASE_COLORS.stroke,
+		Thickness = thickness or 1,
+		Transparency = transparency or 0,
+	}, parent)
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = GUI_NAME
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 80
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = playerGui
+
+gui.Destroying:Connect(function()
+	ResourceManager:cleanup()
+end)
+
+local BASE_WIDTH = 440
+local EXPANDED_HEIGHT = 345
+local COMPACT_HEIGHT = 295
+local COLLAPSED_HEIGHT = 66
+
+local function getTargetHeight()
+	if State.collapsed then
+		return COLLAPSED_HEIGHT
+	end
+	return State.compact and COMPACT_HEIGHT or EXPANDED_HEIGHT
+end
+
+local root = make("Frame", {
+	Name = "Root",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(BASE_WIDTH, EXPANDED_HEIGHT),
+	BackgroundColor3 = BASE_COLORS.background,
+	BorderSizePixel = 0,
+	ZIndex = 2,
+}, gui)
+addCorner(root, 16)
+local rootStroke = addStroke(root, getAccent().accentDark, 1, 0.15)
+local rootScale = make("UIScale", { Scale = 1 }, root)
+
+make("ImageLabel", {
+	Name = "Shadow",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(0.5, 0, 0.5, 8),
+	Size = UDim2.new(1, 42, 1, 42),
+	BackgroundTransparency = 1,
+	Image = "rbxassetid://6014261993",
+	ImageColor3 = Color3.new(0, 0, 0),
+	ImageTransparency = 0.42,
+	ScaleType = Enum.ScaleType.Slice,
+	SliceCenter = Rect.new(49, 49, 450, 450),
+	ZIndex = 0,
+}, root)
+
+local topAccent = make("Frame", {
+	Name = "TopAccent",
+	Size = UDim2.new(1, -36, 0, 3),
+	Position = UDim2.fromOffset(18, 0),
+	BackgroundColor3 = getAccent().accent,
+	BorderSizePixel = 0,
+	ZIndex = 5,
+}, root)
+addCorner(topAccent, 4)
+
+local header = make("Frame", {
+	Name = "Header",
+	Position = UDim2.fromOffset(0, 4),
+	Size = UDim2.new(1, 0, 0, 58),
+	BackgroundTransparency = 1,
+	Active = true,
+	ZIndex = 4,
+}, root)
+
+local brandMark = make("Frame", {
+	Position = UDim2.fromOffset(17, 12),
+	Size = UDim2.fromOffset(34, 34),
+	BackgroundColor3 = getAccent().accentDark,
+	BorderSizePixel = 0,
+}, header)
+addCorner(brandMark, 10)
+
+make("TextLabel", {
+	BackgroundTransparency = 1,
+	Size = UDim2.fromScale(1, 1),
+	Text = "Z",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 21,
+	TextColor3 = BASE_COLORS.text,
+}, brandMark)
+
+make("TextLabel", {
+	Position = UDim2.fromOffset(61, 10),
+	Size = UDim2.new(1, -145, 0, 22),
+	BackgroundTransparency = 1,
+	Text = "by ZENDANRA",
+	Font = Enum.Font.GothamBold,
+	TextSize = 14,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+
+make("TextLabel", {
+	Position = UDim2.fromOffset(61, 31),
+	Size = UDim2.new(1, -145, 0, 16),
+	BackgroundTransparency = 1,
+	Text = "DIAGNOSTICS & INTERFACE",
+	Font = Enum.Font.GothamMedium,
+	TextSize = 9,
+	TextColor3 = BASE_COLORS.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+
+local collapseButton = make("TextButton", {
+	Name = "Collapse",
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, -48, 0, 15),
+	Size = UDim2.fromOffset(28, 27),
+	BackgroundColor3 = BASE_COLORS.surface2,
+	Text = "—",
+	Font = Enum.Font.GothamBold,
+	TextSize = 15,
+	TextColor3 = BASE_COLORS.text,
+	AutoButtonColor = false,
+}, header)
+addCorner(collapseButton, 8)
+
+local closeButton = make("TextButton", {
+	Name = "Close",
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, -15, 0, 15),
+	Size = UDim2.fromOffset(27, 27),
+	BackgroundColor3 = Color3.fromRGB(65, 35, 40),
+	Text = "×",
+	Font = Enum.Font.GothamMedium,
+	TextSize = 20,
+	TextColor3 = Color3.fromRGB(255, 190, 190),
+	AutoButtonColor = false,
+}, header)
+addCorner(closeButton, 8)
+
+local divider = make("Frame", {
+	Position = UDim2.fromOffset(16, 61),
+	Size = UDim2.new(1, -32, 0, 1),
+	BackgroundColor3 = BASE_COLORS.stroke,
+	BorderSizePixel = 0,
+}, root)
+
+local body = make("Frame", {
+	Name = "Body",
+	Position = UDim2.fromOffset(0, 66),
+	Size = UDim2.new(1, 0, 1, -66),
+	BackgroundTransparency = 1,
+}, root)
+
+local sidebar = make("Frame", {
+	Position = UDim2.fromOffset(13, 8),
+	Size = UDim2.new(0, 124, 1, -44),
+	BackgroundColor3 = BASE_COLORS.surface,
+	BorderSizePixel = 0,
+}, body)
+addCorner(sidebar, 12)
+
+make("UIPadding", {
+	PaddingTop = UDim.new(0, 10),
+	PaddingLeft = UDim.new(0, 8),
+	PaddingRight = UDim.new(0, 8),
+}, sidebar)
+
+make("UIListLayout", {
+	Padding = UDim.new(0, 7),
+	SortOrder = Enum.SortOrder.LayoutOrder,
+}, sidebar)
+
+local content = make("Frame", {
+	Position = UDim2.fromOffset(148, 8),
+	Size = UDim2.new(1, -161, 1, -44),
+	BackgroundTransparency = 1,
+}, body)
+
+local pages = {}
+local navButtons = {}
+
+local function createPage(name)
+	local page = make("ScrollingFrame", {
+		Name = name,
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = getAccent().accent,
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Visible = false,
+	}, content)
+	make("UIPadding", {
+		PaddingRight = UDim.new(0, 5),
+		PaddingBottom = UDim.new(0, 8),
+	}, page)
+	make("UIListLayout", {
+		Padding = UDim.new(0, 9),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, page)
+	onThemeChange(function(accent)
+		page.ScrollBarImageColor3 = accent.accent
+	end)
+	pages[name] = page
+	return page
+end
+
+local function createCard(parent, height, order)
+	local card = make("Frame", {
+		LayoutOrder = order or 0,
+		Size = UDim2.new(1, 0, 0, height or 72),
+		BackgroundColor3 = BASE_COLORS.surface,
+		BorderSizePixel = 0,
+	}, parent)
+	addCorner(card, 11)
+	addStroke(card, BASE_COLORS.stroke, 1, 0.45)
+	return card
+end
+
+local function createMetricCard(parent, titleKey, initialValue, order)
+	local card = createCard(parent, 56, order)
+	local titleLabel = make("TextLabel", {
+		Position = UDim2.fromOffset(12, 8),
+		Size = UDim2.new(1, -24, 0, 15),
+		BackgroundTransparency = 1,
+		Text = tr(titleKey),
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 10,
+		TextColor3 = BASE_COLORS.muted,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, card)
+	local valueLabel = make("TextLabel", {
+		Position = UDim2.fromOffset(12, 26),
+		Size = UDim2.new(1, -24, 0, 21),
+		BackgroundTransparency = 1,
+		Text = initialValue,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		TextColor3 = getAccent().accent,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, card)
+
+	onThemeChange(function(accent)
+		valueLabel.TextColor3 = accent.accent
+	end)
+	onLanguageChange(function()
+		titleLabel.Text = tr(titleKey)
+	end)
+
+	return valueLabel
+end
+
+local function createToggle(parent, labelKey, getInitial, onChanged, order)
+	local row = createCard(parent, 48, order)
+	local label = make("TextLabel", {
+		Position = UDim2.fromOffset(12, 0),
+		Size = UDim2.new(1, -85, 1, 0),
+		BackgroundTransparency = 1,
+		Text = tr(labelKey),
+		Font = Enum.Font.GothamMedium,
+		TextSize = 11,
+		TextColor3 = BASE_COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+
+	local button = make("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -10, 0.5, 0),
+		Size = UDim2.fromOffset(54, 26),
+		BackgroundColor3 = getInitial() and getAccent().accentDark or BASE_COLORS.surface3,
+		Text = getInitial() and tr("on") or tr("off"),
+		Font = Enum.Font.GothamBold,
+		TextSize = 9,
+		TextColor3 = BASE_COLORS.text,
+		AutoButtonColor = false,
+	}, row)
+	addCorner(button, 8)
+
+	local function syncVisual()
+		local active = getInitial()
+		button.Text = active and tr("on") or tr("off")
+		playTween(button, 0.16, {
+			BackgroundColor3 = active and getAccent().accentDark or BASE_COLORS.surface3
+		})
+	end
+
+	ResourceManager:connect(button.Activated, function()
+		onChanged(not getInitial())
+		syncVisual()
+	end, "Toggle_" .. labelKey)
+
+	onThemeChange(syncVisual)
+	onLanguageChange(function()
+		label.Text = tr(labelKey)
+		syncVisual()
+	end)
+
+	return syncVisual
+end
+
+local dashboard = createPage("Dashboard")
+local dashWelcome = createCard(dashboard, 76, 1)
+local welcomeTitle = make("TextLabel", {
+	Position = UDim2.fromOffset(13, 11),
+	Size = UDim2.new(1, -26, 0, 22),
+	BackgroundTransparency = 1,
+	Text = tr("welcome"),
+	Font = Enum.Font.GothamBold,
+	TextSize = 17,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, dashWelcome)
+local welcomeSub = make("TextLabel", {
+	Position = UDim2.fromOffset(13, 37),
+	Size = UDim2.new(1, -26, 0, 18),
+	BackgroundTransparency = 1,
+	Text = tr("subtitle"),
+	Font = Enum.Font.Gotham,
+	TextSize = 11,
+	TextColor3 = BASE_COLORS.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, dashWelcome)
+
+local statusValue = createMetricCard(dashboard, "status", "●  " .. tr("ready"), 2)
+local playerCountValue = createMetricCard(dashboard, "playerCount", tostring(#Players:GetPlayers()), 3)
+
+local quickLabel = make("TextLabel", {
+	LayoutOrder = 4,
+	Size = UDim2.new(1, 0, 0, 16),
+	BackgroundTransparency = 1,
+	Text = tr("quick"),
+	Font = Enum.Font.GothamBold,
+	TextSize = 10,
+	TextColor3 = BASE_COLORS.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, dashboard)
+
+local quickCard = createCard(dashboard, 52, 5)
+local quickDiagBtn = make("TextButton", {
+	Position = UDim2.fromOffset(10, 8),
+	Size = UDim2.new(0.5, -14, 0, 35),
+	BackgroundColor3 = BASE_COLORS.surface2,
+	Text = "⚙  " .. tr("diagnostics"),
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 10,
+	TextColor3 = BASE_COLORS.text,
+	AutoButtonColor = false,
+}, quickCard)
+addCorner(quickDiagBtn, 8)
+
+local quickLangBtn = make("TextButton", {
+	Position = UDim2.new(0.5, 4, 0, 8),
+	Size = UDim2.new(0.5, -14, 0, 35),
+	BackgroundColor3 = BASE_COLORS.surface2,
+	Text = "文  " .. tr("language"),
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 10,
+	TextColor3 = BASE_COLORS.text,
+	AutoButtonColor = false,
+}, quickCard)
+addCorner(quickLangBtn, 8)
+
+onLanguageChange(function()
+	welcomeTitle.Text = tr("welcome")
+	welcomeSub.Text = tr("subtitle")
+	statusValue.Text = "●  " .. tr("ready")
+	quickLabel.Text = tr("quick")
+	quickDiagBtn.Text = "⚙  " .. tr("diagnostics")
+	quickLangBtn.Text = "文  " .. tr("language")
+end)
+
+local diagnosticsPage = createPage("Diagnostics")
+local diagIntro = createCard(diagnosticsPage, 60, 1)
+local diagTitle = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 9),
+	Size = UDim2.new(1, -24, 0, 19),
+	BackgroundTransparency = 1,
+	Text = tr("diagTitle"),
+	Font = Enum.Font.GothamBold,
+	TextSize = 12,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, diagIntro)
+local diagDesc = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 31),
+	Size = UDim2.new(1, -24, 0, 18),
+	BackgroundTransparency = 1,
+	Text = tr("diagDesc"),
+	Font = Enum.Font.Gotham,
+	TextSize = 9,
+	TextColor3 = BASE_COLORS.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, diagIntro)
+
+local fpsMetric = createMetricCard(diagnosticsPage, "fpsLabel", "60 FPS", 2)
+local pingMetric = createMetricCard(diagnosticsPage, "pingLabel", "0 ms", 3)
+local rigMetric = createMetricCard(diagnosticsPage, "rigLabel", "Checking...", 4)
+local screenMetric = createMetricCard(diagnosticsPage, "screenLabel", "1920x1080 (100%)", 5)
+
+onLanguageChange(function()
+	diagTitle.Text = tr("diagTitle")
+	diagDesc.Text = tr("diagDesc")
+end)
+
+local appearancePage = createPage("Appearance")
+local appIntro = createCard(appearancePage, 60, 1)
+local appTitle = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 9),
+	Size = UDim2.new(1, -24, 0, 19),
+	BackgroundTransparency = 1,
+	Text = tr("appearanceTitle"),
+	Font = Enum.Font.GothamBold,
+	TextSize = 12,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, appIntro)
+local appDesc = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 31),
+	Size = UDim2.new(1, -24, 0, 18),
+	BackgroundTransparency = 1,
+	Text = tr("appearanceDesc"),
+	Font = Enum.Font.Gotham,
+	TextSize = 9,
+	TextColor3 = BASE_COLORS.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, appIntro)
+
+local themeCard = createCard(appearancePage, 88, 2)
+local themeTitle = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 9),
+	Size = UDim2.new(1, -24, 0, 17),
+	BackgroundTransparency = 1,
+	Text = tr("theme"),
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 11,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, themeCard)
+
+local themeButtons = {}
+local themeOrder = { "Emerald", "Blue", "Violet", "Crimson" }
+for index, name in ipairs(themeOrder) do
+	local swatch = make("TextButton", {
+		Position = UDim2.fromOffset(12 + (index - 1) * 43, 36),
+		Size = UDim2.fromOffset(34, 34),
+		BackgroundColor3 = THEMES[name].accent,
+		Text = "",
+		AutoButtonColor = false,
+	}, themeCard)
+	addCorner(swatch, 10)
+	local outline = addStroke(swatch, BASE_COLORS.text, 2, name == State.theme and 0 or 1)
+	themeButtons[name] = outline
+end
+
+local scaleCard = createCard(appearancePage, 80, 3)
+local scaleTitle = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 9),
+	Size = UDim2.new(1, -24, 0, 17),
+	BackgroundTransparency = 1,
+	Text = tr("scale") .. "  •  100%",
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 11,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, scaleCard)
+
+local scaleTrack = make("Frame", {
+	Position = UDim2.fromOffset(13, 46),
+	Size = UDim2.new(1, -26, 0, 5),
+	BackgroundColor3 = BASE_COLORS.surface3,
+	BorderSizePixel = 0,
+}, scaleCard)
+addCorner(scaleTrack, 5)
+
+local scaleFill = make("Frame", {
+	Size = UDim2.fromScale(0.5, 1),
+	BackgroundColor3 = getAccent().accent,
+	BorderSizePixel = 0,
+}, scaleTrack)
+addCorner(scaleFill, 5)
+
+local scaleKnob = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(13, 13),
+	BackgroundColor3 = BASE_COLORS.text,
+	BorderSizePixel = 0,
+}, scaleTrack)
+addCorner(scaleKnob, 7)
+
+local scaleHitbox = make("TextButton", {
+	Position = UDim2.fromOffset(8, 28),
+	Size = UDim2.new(1, -16, 0, 38),
+	BackgroundTransparency = 1,
+	Text = "",
+	AutoButtonColor = false,
+}, scaleCard)
+
+onThemeChange(function(accent)
+	scaleFill.BackgroundColor3 = accent.accent
+	for name, outline in pairs(themeButtons) do
+		outline.Transparency = (name == State.theme) and 0 or 1
+	end
+end)
+
+onLanguageChange(function()
+	appTitle.Text = tr("appearanceTitle")
+	appDesc.Text = tr("appearanceDesc")
+	themeTitle.Text = tr("theme")
+	scaleTitle.Text = tr("scale") .. "  •  " .. tostring(math.floor(State.uiScale * 100 + 0.5)) .. "%"
+end)
+
+local settingsPage = createPage("Settings")
+local setIntro = createCard(settingsPage, 60, 1)
+local setTitle = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 9),
+	Size = UDim2.new(1, -24, 0, 19),
+	BackgroundTransparency = 1,
+	Text = tr("settingsTitle"),
+	Font = Enum.Font.GothamBold,
+	TextSize = 12,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, setIntro)
+local setDesc = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 31),
+	Size = UDim2.new(1, -24, 0, 18),
+	BackgroundTransparency = 1,
+	Text = tr("settingsDesc"),
+	Font = Enum.Font.Gotham,
+	TextSize = 9,
+	TextColor3 = BASE_COLORS.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, setIntro)
+
+local syncAnimToggle = createToggle(
+	settingsPage,
+	"animation",
+	function() return State.animations end,
+	function(val)
+		State.animations = val
+		savePersistedState()
+	end,
+	2
+)
+
+local applyResponsiveLayout
+local syncCompactToggle = createToggle(
+	settingsPage,
+	"compact",
+	function() return State.compact end,
+	function(val)
+		State.compact = val
+		savePersistedState()
+		if not State.collapsed then
+			playTween(root, 0.2, { Size = UDim2.fromOffset(BASE_WIDTH, getTargetHeight()) })
+		end
+		if applyResponsiveLayout then
+			applyResponsiveLayout()
+		end
+	end,
+	3
+)
+
+local langCard = createCard(settingsPage, 58, 4)
+local langTitle = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 7),
+	Size = UDim2.new(1, -24, 0, 15),
+	BackgroundTransparency = 1,
+	Text = tr("language"),
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 10,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, langCard)
+local langButton = make("TextButton", {
+	Position = UDim2.fromOffset(12, 28),
+	Size = UDim2.fromOffset(95, 23),
+	BackgroundColor3 = BASE_COLORS.surface2,
+	Text = "VI  /  EN",
+	Font = Enum.Font.GothamBold,
+	TextSize = 9,
+	TextColor3 = BASE_COLORS.text,
+	AutoButtonColor = false,
+}, langCard)
+addCorner(langButton, 7)
+
+local resetButton = make("TextButton", {
+	LayoutOrder = 5,
+	Size = UDim2.new(1, 0, 0, 36),
+	BackgroundColor3 = Color3.fromRGB(65, 37, 42),
+	Text = tr("reset"),
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 10,
+	TextColor3 = Color3.fromRGB(255, 205, 205),
+	AutoButtonColor = false,
+}, settingsPage)
+addCorner(resetButton, 9)
+
+onLanguageChange(function()
+	setTitle.Text = tr("settingsTitle")
+	setDesc.Text = tr("settingsDesc")
+	langTitle.Text = tr("language")
+	resetButton.Text = tr("reset")
+end)
+
+local toast = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 1),
+	Position = UDim2.new(0.5, 0, 1, 48),
+	Size = UDim2.fromOffset(220, 32),
+	BackgroundColor3 = BASE_COLORS.surface3,
+	BorderSizePixel = 0,
+	ZIndex = 30,
+}, root)
+addCorner(toast, 9)
+addStroke(toast, BASE_COLORS.stroke, 1, 0.2)
+local toastLabel = make("TextLabel", {
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	Text = "",
+	Font = Enum.Font.GothamMedium,
+	TextSize = 10,
+	TextColor3 = BASE_COLORS.text,
+	ZIndex = 31,
+}, toast)
+
+local toastToken = 0
+local function notify(message)
+	toastToken += 1
+	local token = toastToken
+	toastLabel.Text = message
+	playTween(toast, 0.2, { Position = UDim2.new(0.5, 0, 1, -12) })
+	task.delay(1.7, function()
+		if ResourceManager.alive and token == toastToken then
+			playTween(toast, 0.2, { Position = UDim2.new(0.5, 0, 1, 48) })
+		end
+	end)
+end
+
+local footer = make("TextLabel", {
+	Position = UDim2.new(0, 13, 1, -25),
+	Size = UDim2.new(1, -26, 0, 15),
+	BackgroundTransparency = 1,
+	Text = tr("footer"),
+	Font = Enum.Font.GothamBold,
+	TextSize = 8,
+	TextColor3 = BASE_COLORS.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, body)
+
+onLanguageChange(function()
+	footer.Text = tr("footer")
+end)
+
+local function broadcastTheme()
+	local accent = getAccent()
+	playTween(topAccent, 0.18, { BackgroundColor3 = accent.accent })
+	playTween(brandMark, 0.18, { BackgroundColor3 = accent.accentDark })
+	playTween(rootStroke, 0.18, { Color = accent.accentDark })
+	for _, fn in ipairs(accentListeners) do
+		fn(accent)
+	end
+end
+
+local function broadcastLanguage()
+	for _, fn in ipairs(languageListeners) do
+		fn()
+	end
+end
+
+local function showTab(name)
+	if not pages[name] then return end
+	State.currentTab = name
+	for pageName, page in pairs(pages) do
+		page.Visible = (pageName == name)
+	end
+	for buttonName, button in pairs(navButtons) do
+		local selected = (buttonName == name)
+		playTween(button, 0.16, {
+			BackgroundColor3 = selected and getAccent().accentDark or BASE_COLORS.surface2
+		})
+		button.TextColor3 = selected and BASE_COLORS.text or BASE_COLORS.muted
+	end
+end
+
+onThemeChange(function(accent)
+	local activeBtn = navButtons[State.currentTab]
+	if activeBtn then
+		playTween(activeBtn, 0.15, { BackgroundColor3 = accent.accentDark })
+	end
+end)
+
+local navKeys = {
+	Dashboard = "dashboard",
+	Diagnostics = "diagnostics",
+	Appearance = "appearance",
+	Settings = "settings",
+}
+
+local function makeNav(name, order)
+	local button = make("TextButton", {
+		Name = name,
+		LayoutOrder = order,
+		Size = UDim2.new(1, 0, 0, 34),
+		BackgroundColor3 = BASE_COLORS.surface2,
+		Text = "  " .. tr(navKeys[name]),
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 10,
+		TextColor3 = BASE_COLORS.muted,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		AutoButtonColor = false,
+	}, sidebar)
+	addCorner(button, 8)
+	navButtons[name] = button
+
+	ResourceManager:connect(button.Activated, function()
+		showTab(name)
+	end, "Nav_" .. name)
+end
+
+makeNav("Dashboard", 1)
+makeNav("Diagnostics", 2)
+makeNav("Appearance", 3)
+makeNav("Settings", 4)
+
+onLanguageChange(function()
+	for name, button in pairs(navButtons) do
+		button.Text = "  " .. tr(navKeys[name])
+	end
+end)
+
+local function clampRootToViewport()
+	local camera = workspace.CurrentCamera
+	if not camera then return end
+	local viewport = camera.ViewportSize
+	if viewport.X <= 0 or viewport.Y <= 0 then return end
+
+	local halfW = (BASE_WIDTH * rootScale.Scale) * 0.5
+	local halfH = (getTargetHeight() * rootScale.Scale) * 0.5
+	local margin = 8
+
+	local absPos = root.AbsolutePosition
+	local absSize = root.AbsoluteSize
+	local centerX = absPos.X + absSize.X * 0.5
+	local centerY = absPos.Y + absSize.Y * 0.5
+
+	local clampedX = math.clamp(centerX, halfW + margin, math.max(halfW + margin, viewport.X - halfW - margin))
+	local clampedY = math.clamp(centerY, halfH + margin, math.max(halfH + margin, viewport.Y - halfH - margin))
+
+	if math.abs(clampedX - centerX) > 1 or math.abs(clampedY - centerY) > 1 then
+		root.Position = UDim2.fromOffset(clampedX, clampedY)
+	end
+end
+
+applyResponsiveLayout = function()
+	local camera = workspace.CurrentCamera
+	if not camera then return end
+	local viewport = camera.ViewportSize
+	if viewport.X <= 0 or viewport.Y <= 0 then return end
+
+	local maxWidth = viewport.X * 0.94
+	local maxHeight = viewport.Y * 0.88
+	local fitScale = math.min(maxWidth / BASE_WIDTH, maxHeight / getTargetHeight(), 1)
+	local effectiveScale = math.min(State.uiScale, fitScale)
+	rootScale.Scale = effectiveScale
+
+	if not State.hasCustomPosition then
+		root.Position = UDim2.fromScale(0.5, 0.5)
+	else
+		clampRootToViewport()
+	end
+
+	screenMetric.Text = string.format(
+		"%dx%d  (%d%%)",
+		math.floor(viewport.X),
+		math.floor(viewport.Y),
+		math.floor(effectiveScale * 100 + 0.5)
+	)
+end
+
+local function applyScale(value, shouldSave)
+	State.uiScale = math.clamp(value, 0.82, 1.12)
+	local alpha = (State.uiScale - 0.82) / (1.12 - 0.82)
+	scaleFill.Size = UDim2.fromScale(alpha, 1)
+	scaleKnob.Position = UDim2.fromScale(alpha, 0.5)
+	scaleTitle.Text = tr("scale") .. "  •  " .. tostring(math.floor(State.uiScale * 100 + 0.5)) .. "%"
+	applyResponsiveLayout()
+	if shouldSave then
+		savePersistedState()
+	end
+end
+
+local function bindInteractions()
+	for name, _ in pairs(themeButtons) do
+		local swatch = themeCard:GetChildren()[table.find(themeOrder, name) + 1]
+		if swatch and swatch:IsA("TextButton") then
+			ResourceManager:connect(swatch.Activated, function()
+				State.theme = name
+				savePersistedState()
+				broadcastTheme()
+				notify(tr("themeChanged"))
+			end, "Theme_" .. name)
+		end
+	end
+
+	local draggingScale = false
+	local function updateScaleFromInput(input)
+		if scaleTrack.AbsoluteSize.X <= 0 then return end
+		local ratio = math.clamp(
+			(input.Position.X - scaleTrack.AbsolutePosition.X) / scaleTrack.AbsoluteSize.X,
+			0, 1
+		)
+		applyScale(0.82 + ratio * (1.12 - 0.82), false)
+	end
+
+	ResourceManager:connect(scaleHitbox.InputBegan, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			draggingScale = true
+			updateScaleFromInput(input)
+		end
+	end, "ScaleInputBegan")
+
+	ResourceManager:connect(UserInputService.InputChanged, function(input)
+		if draggingScale and (
+			input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch
+		) then
+			updateScaleFromInput(input)
+		end
+	end, "ScaleInputChanged")
+
+	ResourceManager:connect(UserInputService.InputEnded, function(input)
+		if draggingScale and (
+			input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch
+		) then
+			draggingScale = false
+			savePersistedState()
+		end
+	end, "ScaleInputEnded")
+
+	ResourceManager:connect(UserInputService.InputBegan, function(input, gameProcessed)
+		LogicController:handleInputBegan(input, gameProcessed)
+	end, "LogicControllerInputBegan")
+
+	local function toggleLanguage()
+		State.language = (State.language == "VI") and "EN" or "VI"
+		savePersistedState()
+		broadcastLanguage()
+		notify(tr("saved"))
+	end
+
+	ResourceManager:connect(quickLangBtn.Activated, toggleLanguage, "QuickLang")
+	ResourceManager:connect(langButton.Activated, toggleLanguage, "SettingsLang")
+	ResourceManager:connect(quickDiagBtn.Activated, function()
+		showTab("Diagnostics")
+	end, "QuickDiag")
+
+	ResourceManager:connect(resetButton.Activated, function()
+		State.theme = "Emerald"
+		State.language = "VI"
+		State.animations = true
+		State.compact = false
+		State.hasCustomPosition = false
+		applyScale(1.0, false)
+		savePersistedState()
+		broadcastTheme()
+		broadcastLanguage()
+		syncAnimToggle()
+		syncCompactToggle()
+		playTween(root, 0.2, {
+			Size = UDim2.fromOffset(BASE_WIDTH, getTargetHeight()),
+			Position = UDim2.fromScale(0.5, 0.5),
+		})
+		notify(tr("resetDone"))
+	end, "ResetDefault")
+
+	local draggingWindow = false
+	local dragStartPos
+	local windowStartPos
+
+	ResourceManager:connect(header.InputBegan, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			draggingWindow = true
+			dragStartPos = input.Position
+			windowStartPos = root.Position
+		end
+	end, "DragStart")
+
+	ResourceManager:connect(UserInputService.InputChanged, function(input)
+		if draggingWindow and (
+			input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch
+		) then
+			local delta = input.Position - dragStartPos
+			State.hasCustomPosition = true
+			root.Position = UDim2.new(
+				windowStartPos.X.Scale,
+				windowStartPos.X.Offset + delta.X,
+				windowStartPos.Y.Scale,
+				windowStartPos.Y.Offset + delta.Y
+			)
+		end
+	end, "DragMove")
+
+	ResourceManager:connect(UserInputService.InputEnded, function(input)
+		if draggingWindow and (
+			input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch
+		) then
+			draggingWindow = false
+			clampRootToViewport()
+		end
+	end, "DragEnd")
+
+	ResourceManager:connect(collapseButton.Activated, function()
+		State.collapsed = not State.collapsed
+		body.Visible = not State.collapsed
+		divider.Visible = not State.collapsed
+		collapseButton.Text = State.collapsed and "+" or "—"
+		playTween(root, 0.2, { Size = UDim2.fromOffset(BASE_WIDTH, getTargetHeight()) })
+		clampRootToViewport()
+	end, "CollapseToggle")
+
+	ResourceManager:connect(closeButton.Activated, function()
+		ResourceManager:cleanup()
+		gui:Destroy()
+	end, "CloseGui")
+
+	local function refreshPlayers()
+		playerCountValue.Text = tostring(#Players:GetPlayers())
+	end
+	ResourceManager:connect(Players.PlayerAdded, refreshPlayers, "PlayerAdded")
+	ResourceManager:connect(Players.PlayerRemoving, refreshPlayers, "PlayerRemoving")
+
+	local function updateCharacterRig(character)
+		if not character then
+			rigMetric.Text = "No Character"
+			return
+		end
+		local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 3)
+		if humanoid then
+			local pairsList = LogicController:getRigPairs(character)
+			local jointCount = pairsList and #pairsList or 0
+			rigMetric.Text = string.format("%s (%d)", humanoid.RigType.Name, jointCount)
+		else
+			rigMetric.Text = "Unknown"
+		end
+	end
+	updateCharacterRig(player.Character)
+	ResourceManager:connect(player.CharacterAdded, updateCharacterRig, "CharacterAdded")
+
+	local cameraViewportConn
+	local function bindCurrentCamera()
+		if cameraViewportConn and cameraViewportConn.Connected then
+			cameraViewportConn:Disconnect()
+		end
+		local cam = workspace.CurrentCamera
+		if cam then
+			cameraViewportConn = ResourceManager:connect(
+				cam:GetPropertyChangedSignal("ViewportSize"),
+				applyResponsiveLayout,
+				"ViewportSizeChanged"
+			)
+		end
+		applyResponsiveLayout()
+	end
+	bindCurrentCamera()
+	ResourceManager:connect(workspace:GetPropertyChangedSignal("CurrentCamera"), bindCurrentCamera, "CameraChanged")
+
+	LogicController:bind(function(dt, controller)
+		if not ResourceManager.alive then return end
+		local hasValidSubject = controller.activeSubject ~= nil
+		controller:updateSubjectState(dt, hasValidSubject)
+		for _, updater in ipairs(ResourceManager.updaters) do
+			updater(dt, controller)
+		end
+	end)
+
+	local frameCount = 0
+	local elapsed = 0
+	ResourceManager:connect(RunService.RenderStepped, function(dt)
+		frameCount += 1
+		elapsed += dt
+		if elapsed >= 0.5 then
+			local fps = math.floor((frameCount / elapsed) + 0.5)
+			fpsMetric.Text = tostring(fps) .. " FPS"
+
+			local pingMs = 0
+			pcall(function()
+				pingMs = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue() + 0.5)
+			end)
+			pingMetric.Text = tostring(pingMs) .. " ms"
+
+			frameCount = 0
+			elapsed = 0
+		end
+	end, "DiagnosticsLoop")
+end
+
+local loading = make("Frame", {
+	Name = "Loading",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = BASE_COLORS.background,
+	ZIndex = 50,
+}, gui)
+addCorner(loading, 16)
+
+make("TextLabel", {
+	Position = UDim2.new(0, 22, 0.5, -34),
+	Size = UDim2.new(1, -44, 0, 24),
+	BackgroundTransparency = 1,
+	Text = "ZENDANRA",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 18,
+	TextColor3 = BASE_COLORS.text,
+	ZIndex = 51,
+}, loading)
+
+local loadingStatus = make("TextLabel", {
+	Position = UDim2.new(0, 22, 0.5, -7),
+	Size = UDim2.new(1, -44, 0, 18),
+	BackgroundTransparency = 1,
+	Text = "Initializing...",
+	Font = Enum.Font.Gotham,
+	TextSize = 10,
+	TextColor3 = BASE_COLORS.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = 51,
+}, loading)
+
+local loadingTrack = make("Frame", {
+	Position = UDim2.new(0, 22, 0.5, 22),
+	Size = UDim2.new(1, -44, 0, 5),
+	BackgroundColor3 = BASE_COLORS.surface3,
+	BorderSizePixel = 0,
+	ZIndex = 51,
+}, loading)
+addCorner(loadingTrack, 5)
+
+local loadingFill = make("Frame", {
+	Size = UDim2.fromScale(0, 1),
+	BackgroundColor3 = getAccent().accent,
+	BorderSizePixel = 0,
+	ZIndex = 52,
+}, loadingTrack)
+addCorner(loadingFill, 5)
+
+local function runStep(label, progress, taskFn)
+	loadingStatus.Text = label
+	playTween(loadingFill, 0.14, { Size = UDim2.fromScale(progress, 1) })
+	if taskFn then
+		taskFn()
+	end
+	task.wait(0.12)
+end
+
+local initSuccess = safeCall("Initialization", function()
+	runStep("Loading saved preferences...", 0.25, function()
+		loadPersistedState()
+		loadingFill.BackgroundColor3 = getAccent().accent
+	end)
+
+	runStep("Binding interactions & camera...", 0.60, function()
+		bindInteractions()
+	end)
+
+	runStep("Applying theme & responsive layout...", 0.85, function()
+		broadcastTheme()
+		broadcastLanguage()
+		syncAnimToggle()
+		syncCompactToggle()
+		applyScale(State.uiScale, false)
+		root.Size = UDim2.fromOffset(BASE_WIDTH, getTargetHeight())
+		showTab("Dashboard")
+	end)
+
+	runStep("Ready!", 1.0, nil)
+end)
+
+if not initSuccess then
+	ResourceManager:cleanup()
+	gui:Destroy()
+	return
+end
+
+playTween(loading, 0.2, { BackgroundTransparency = 1 })
+task.wait(0.22)
+if loading and loading.Parent then
+	loading:Destroy()
+end
+notify(tr("ready"))
