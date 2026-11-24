@@ -4,22 +4,59 @@ local HttpService = game:GetService("HttpService")
 local Stats = game:GetService("Stats")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
 
 if not RunService:IsClient() then
-	warn("[Zendanra UI] Script này chỉ chạy ở phía Client (RunContext = Client).")
+	warn("[Zendanra UI] Script này chỉ chạy ở phía Client.")
 	return
 end
 
 local player = Players.LocalPlayer
 if not player then
-	Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+	local ok = pcall(function()
+		Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+	end)
 	player = Players.LocalPlayer
 end
 
-local playerGui = player:WaitForChild("PlayerGui")
+if not player then
+	warn("[Zendanra UI] Không tìm thấy LocalPlayer.")
+	return
+end
+
+local function getCamera()
+	if workspace.CurrentCamera then
+		return workspace.CurrentCamera
+	end
+	return workspace:FindFirstChildOfClass("Camera")
+end
+
+local function getParentContainer()
+	local pg = player:FindFirstChildOfClass("PlayerGui") or player:FindFirstChild("PlayerGui")
+	if not pg then
+		local ok, found = pcall(function()
+			return player:WaitForChild("PlayerGui", 5)
+		end)
+		if ok and found then
+			pg = found
+		end
+	end
+	if pg then
+		return pg
+	end
+	if typeof(gethui) == "function" then
+		local ok, hui = pcall(gethui)
+		if ok and hui then
+			return hui
+		end
+	end
+	return CoreGui
+end
+
+local parentContainer = getParentContainer()
 local GUI_NAME = "ZendanraModernUI"
 
-local existingGui = playerGui:FindFirstChild(GUI_NAME)
+local existingGui = parentContainer:FindFirstChild(GUI_NAME)
 if existingGui then
 	existingGui:Destroy()
 end
@@ -57,153 +94,6 @@ local R15_PAIRS = {
 	{ "RightLowerLeg", "RightFoot" },
 }
 
-local LogicController = {
-	stepName = "ZendanraClientDebug_" .. HttpService:GenerateGUID(false),
-	graceRemaining = 0,
-	activeSubject = nil,
-}
-
-function LogicController:getRigPairs(character)
-	if not character then
-		return nil
-	end
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid then
-		return nil
-	end
-	if humanoid.RigType == Enum.HumanoidRigType.R6 then
-		return R6_PAIRS
-	end
-	return R15_PAIRS
-end
-
-function LogicController:collectWorldEntities(includeLocal)
-	local list = {}
-	for _, plr in ipairs(Players:GetPlayers()) do
-		if includeLocal or plr ~= player then
-			local char = plr.Character
-			local root = char and char:FindFirstChild("HumanoidRootPart")
-			local hum = char and char:FindFirstChildOfClass("Humanoid")
-			if char and root and hum and hum.Health > 0 then
-				table.insert(list, {
-					player = plr,
-					character = char,
-					root = root,
-					humanoid = hum,
-				})
-			end
-		end
-	end
-	return list
-end
-
-function LogicController:getDisplayEntities()
-	return self:collectWorldEntities(true)
-end
-
-function LogicController:getSelectableEntities()
-	return self:collectWorldEntities(false)
-end
-
-function LogicController:projectWorldPoint(worldPos)
-	local camera = workspace.CurrentCamera
-	if not camera or typeof(worldPos) ~= "Vector3" then
-		return Vector2.zero, false, 0
-	end
-	local viewportPos, onScreen = camera:WorldToViewportPoint(worldPos)
-	local screenPos = Vector2.new(viewportPos.X, viewportPos.Y)
-	local valid = onScreen and viewportPos.Z > 0
-	return screenPos, valid, viewportPos.Z
-end
-
-function LogicController:updateSubjectState(dt, isSubjectValid)
-	if isSubjectValid then
-		self.graceRemaining = 0.25
-		return true
-	end
-	if self.graceRemaining > 0 then
-		self.graceRemaining = math.max(0, self.graceRemaining - dt)
-		return true
-	end
-	self.activeSubject = nil
-	return false
-end
-
-function LogicController:handleInputBegan(input, gameProcessed)
-	if gameProcessed then
-		return
-	end
-	if input.KeyCode == Enum.KeyCode.F4 then
-		self.activeSubject = nil
-		self.graceRemaining = 0
-	end
-end
-
-function LogicController:bind(onTick)
-	self:unbind()
-	RunService:BindToRenderStep(self.stepName, Enum.RenderPriority.Camera.Value + 1, function(dt)
-		if typeof(onTick) == "function" then
-			safeCall("LogicControllerTick", onTick, dt, self)
-		end
-	end)
-end
-
-function LogicController:unbind()
-	pcall(function()
-		RunService:UnbindFromRenderStep(self.stepName)
-	end)
-end
-
-local ResourceManager = {
-	alive = true,
-	connections = {},
-	tweens = {},
-	updaters = {},
-}
-
-function ResourceManager:connect(signal, callback, context)
-	if not self.alive then return nil end
-	local conn = signal:Connect(function(...)
-		if self.alive then
-			safeCall(context or "Signal", callback, ...)
-		end
-	end)
-	table.insert(self.connections, conn)
-	return conn
-end
-
-function ResourceManager:trackTween(tweenObj)
-	if not tweenObj then return nil end
-	self.tweens[tweenObj] = true
-	tweenObj.Completed:Once(function()
-		self.tweens[tweenObj] = nil
-	end)
-	return tweenObj
-end
-
-function ResourceManager:cleanup()
-	if not self.alive then return end
-	self.alive = false
-
-	LogicController:unbind()
-
-	for _, conn in ipairs(self.connections) do
-		if conn.Connected then
-			conn:Disconnect()
-		end
-	end
-	table.clear(self.connections)
-
-	for tweenObj in pairs(self.tweens) do
-		pcall(function()
-			tweenObj:Cancel()
-		end)
-		self.tweens[tweenObj] = nil
-	end
-
-	table.clear(self.updaters)
-end
-
 local BASE_COLORS = {
 	background = Color3.fromRGB(12, 16, 20),
 	surface = Color3.fromRGB(19, 25, 31),
@@ -213,6 +103,9 @@ local BASE_COLORS = {
 	muted = Color3.fromRGB(145, 160, 166),
 	danger = Color3.fromRGB(235, 95, 95),
 	stroke = Color3.fromRGB(48, 65, 69),
+	on = Color3.fromRGB(38, 155, 92),
+	off = Color3.fromRGB(145, 58, 62),
+	locked = Color3.fromRGB(255, 85, 95),
 }
 
 local THEMES = {
@@ -237,6 +130,8 @@ local THEMES = {
 local LOCALE = {
 	VI = {
 		dashboard = "Tổng quan",
+		aim = "Aim",
+		esp = "ESP",
 		diagnostics = "Kiểm thử",
 		appearance = "Giao diện",
 		settings = "Cài đặt",
@@ -245,7 +140,39 @@ local LOCALE = {
 		status = "TRẠNG THÁI HỆ THỐNG",
 		ready = "Giao diện đã sẵn sàng",
 		playerCount = "Người chơi trong máy chủ",
+		aimStatusLabel = "Trạng thái Aim",
+		aimIdle = "Chờ bắn",
+		aimLocking = "Đang khóa mục tiêu",
+		espStatusLabel = "Trạng thái ESP",
+		espActive = "Đang hiển thị",
+		espOff = "Đang tắt",
 		quick = "THAO TÁC NHANH",
+		aimTitle = "Điều khiển Aim (Khi bắn)",
+		aimDesc = "Khóa mục tiêu theo góc nhìn, dự đoán chuyển động và đường ngắm.",
+		enableAim = "Bật Aim (khi bắn)",
+		smoothAim = "Khóa mềm (Smooth)",
+		predictAim = "Bám di chuyển (Predict)",
+		visCheck = "Kiểm tra vật cản (LOS)",
+		showFov = "Hiện vòng FOV",
+		fovLabel = "Góc FOV",
+		smoothLabel = "Tốc độ khóa mềm",
+		regionLabel = "Vùng aim",
+		regHead = "Đầu",
+		regNeck = "Cổ",
+		regBody = "Thân",
+		regLegs = "Chân",
+		targetLabel = "Mục tiêu",
+		targetAll = "Tất cả người chơi",
+		espTitle = "Hiển thị trực quan (ESP)",
+		espDesc = "Theo dõi vị trí, tên, khoảng cách, máu và khung nhân vật.",
+		espEnable = "Bật ESP",
+		espBox = "Khung 2D (Box)",
+		espName = "Tên & Khoảng cách",
+		espHealth = "Thanh máu (HP)",
+		espSkeleton = "Khung xương (Skeleton)",
+		espTracer = "Đường nối (Tracer)",
+		espTeamCheck = "Bỏ qua đồng đội",
+		espMaxDist = "Khoảng cách tối đa",
 		diagTitle = "Công cụ Debug & Hiệu năng",
 		diagDesc = "Thông số thời gian thực của client và nhân vật.",
 		fpsLabel = "Tốc độ khung hình (FPS)",
@@ -271,6 +198,8 @@ local LOCALE = {
 	},
 	EN = {
 		dashboard = "Dashboard",
+		aim = "Aim",
+		esp = "ESP",
 		diagnostics = "Diagnostics",
 		appearance = "Appearance",
 		settings = "Settings",
@@ -279,7 +208,39 @@ local LOCALE = {
 		status = "SYSTEM STATUS",
 		ready = "Interface is ready",
 		playerCount = "Players in server",
+		aimStatusLabel = "Aim Status",
+		aimIdle = "Idle (Fire to lock)",
+		aimLocking = "Locked on target",
+		espStatusLabel = "ESP Status",
+		espActive = "Active",
+		espOff = "Disabled",
 		quick = "QUICK ACTIONS",
+		aimTitle = "Aim Controller (Fire Only)",
+		aimDesc = "FOV-based targeting with velocity prediction and line-of-sight check.",
+		enableAim = "Enable Aim (Fire)",
+		smoothAim = "Smooth Lock",
+		predictAim = "Velocity Predict",
+		visCheck = "Line of Sight (LOS)",
+		showFov = "Show FOV Circle",
+		fovLabel = "FOV Angle",
+		smoothLabel = "Smooth Speed",
+		regionLabel = "Aim Region",
+		regHead = "Head",
+		regNeck = "Neck",
+		regBody = "Body",
+		regLegs = "Legs",
+		targetLabel = "Target Lock",
+		targetAll = "All Players",
+		espTitle = "Visual Overlay (ESP)",
+		espDesc = "Track player position, name, distance, health bar, and rig.",
+		espEnable = "Enable ESP",
+		espBox = "2D Bounding Box",
+		espName = "Name & Distance",
+		espHealth = "Health Bar (HP)",
+		espSkeleton = "Skeleton Rig",
+		espTracer = "Tracer Line",
+		espTeamCheck = "Ignore Teammates",
+		espMaxDist = "Max Distance",
 		diagTitle = "Debug & Performance Monitor",
 		diagDesc = "Real-time client and character diagnostics.",
 		fpsLabel = "Frame Rate (FPS)",
@@ -305,6 +266,24 @@ local LOCALE = {
 	},
 }
 
+local AIM_CONSTANTS = {
+	maxDistance = 500,
+	fovMin = 5,
+	fovMax = 80,
+	smoothMin = 6,
+	smoothMax = 35,
+	breakMultiplier = 1.75,
+	targetSwitchGrace = 0.14,
+	projectileSpeed = 950,
+	leadTimeMin = 0.012,
+	leadTimeMax = 0.12,
+}
+
+local ESP_CONSTANTS = {
+	distMin = 100,
+	distMax = 1500,
+}
+
 local State = {
 	language = "VI",
 	theme = "Emerald",
@@ -314,41 +293,171 @@ local State = {
 	compact = false,
 	animations = true,
 	hasCustomPosition = false,
+
+	aimEnabled = false,
+	showFov = true,
+	smoothAim = true,
+	velocityPredict = true,
+	requireLineOfSight = true,
+	fov = 25,
+	smoothness = 18,
+	region = "Head",
+	targetPlayer = nil,
+
+	espEnabled = false,
+	espBox = true,
+	espName = true,
+	espHealth = true,
+	espSkeleton = true,
+	espTracer = false,
+	espTeamCheck = true,
+	espMaxDistance = 750,
 }
 
+local function safeGetAttribute(inst, name)
+	if not inst then return nil end
+	local ok, val = pcall(function()
+		return inst:GetAttribute(name)
+	end)
+	return ok and val or nil
+end
+
+local function safeSetAttribute(inst, name, val)
+	if not inst then return end
+	pcall(function()
+		inst:SetAttribute(name, val)
+	end)
+end
+
 local function loadPersistedState()
-	local savedLang = player:GetAttribute("Zendanra_Lang")
+	local savedLang = safeGetAttribute(player, "Zendanra_Lang")
 	if savedLang and LOCALE[savedLang] then
 		State.language = savedLang
 	end
 
-	local savedTheme = player:GetAttribute("Zendanra_Theme")
+	local savedTheme = safeGetAttribute(player, "Zendanra_Theme")
 	if savedTheme and THEMES[savedTheme] then
 		State.theme = savedTheme
 	end
 
-	local savedScale = player:GetAttribute("Zendanra_Scale")
+	local savedScale = safeGetAttribute(player, "Zendanra_Scale")
 	if typeof(savedScale) == "number" then
 		State.uiScale = math.clamp(savedScale, 0.82, 1.12)
 	end
 
-	local savedAnim = player:GetAttribute("Zendanra_Anim")
+	local savedAnim = safeGetAttribute(player, "Zendanra_Anim")
 	if typeof(savedAnim) == "boolean" then
 		State.animations = savedAnim
 	end
 
-	local savedCompact = player:GetAttribute("Zendanra_Compact")
+	local savedCompact = safeGetAttribute(player, "Zendanra_Compact")
 	if typeof(savedCompact) == "boolean" then
 		State.compact = savedCompact
+	end
+
+	local savedAim = safeGetAttribute(player, "Zendanra_AimEnabled")
+	if typeof(savedAim) == "boolean" then
+		State.aimEnabled = savedAim
+	end
+
+	local savedShowFov = safeGetAttribute(player, "Zendanra_ShowFov")
+	if typeof(savedShowFov) == "boolean" then
+		State.showFov = savedShowFov
+	end
+
+	local savedSmoothAim = safeGetAttribute(player, "Zendanra_SmoothAim")
+	if typeof(savedSmoothAim) == "boolean" then
+		State.smoothAim = savedSmoothAim
+	end
+
+	local savedPredict = safeGetAttribute(player, "Zendanra_VelocityPredict")
+	if typeof(savedPredict) == "boolean" then
+		State.velocityPredict = savedPredict
+	end
+
+	local savedLos = safeGetAttribute(player, "Zendanra_RequireLOS")
+	if typeof(savedLos) == "boolean" then
+		State.requireLineOfSight = savedLos
+	end
+
+	local savedFov = safeGetAttribute(player, "Zendanra_Fov")
+	if typeof(savedFov) == "number" then
+		State.fov = math.clamp(math.floor(savedFov + 0.5), AIM_CONSTANTS.fovMin, AIM_CONSTANTS.fovMax)
+	end
+
+	local savedSmooth = safeGetAttribute(player, "Zendanra_Smoothness")
+	if typeof(savedSmooth) == "number" then
+		State.smoothness = math.clamp(math.floor(savedSmooth + 0.5), AIM_CONSTANTS.smoothMin, AIM_CONSTANTS.smoothMax)
+	end
+
+	local savedRegion = safeGetAttribute(player, "Zendanra_AimRegion")
+	if savedRegion == "Head" or savedRegion == "Neck" or savedRegion == "Body" or savedRegion == "Legs" then
+		State.region = savedRegion
+	end
+
+	local savedEspEnabled = safeGetAttribute(player, "Zendanra_EspEnabled")
+	if typeof(savedEspEnabled) == "boolean" then
+		State.espEnabled = savedEspEnabled
+	end
+
+	local savedEspBox = safeGetAttribute(player, "Zendanra_EspBox")
+	if typeof(savedEspBox) == "boolean" then
+		State.espBox = savedEspBox
+	end
+
+	local savedEspName = safeGetAttribute(player, "Zendanra_EspName")
+	if typeof(savedEspName) == "boolean" then
+		State.espName = savedEspName
+	end
+
+	local savedEspHealth = safeGetAttribute(player, "Zendanra_EspHealth")
+	if typeof(savedEspHealth) == "boolean" then
+		State.espHealth = savedEspHealth
+	end
+
+	local savedEspSkeleton = safeGetAttribute(player, "Zendanra_EspSkeleton")
+	if typeof(savedEspSkeleton) == "boolean" then
+		State.espSkeleton = savedEspSkeleton
+	end
+
+	local savedEspTracer = safeGetAttribute(player, "Zendanra_EspTracer")
+	if typeof(savedEspTracer) == "boolean" then
+		State.espTracer = savedEspTracer
+	end
+
+	local savedEspTeam = safeGetAttribute(player, "Zendanra_EspTeamCheck")
+	if typeof(savedEspTeam) == "boolean" then
+		State.espTeamCheck = savedEspTeam
+	end
+
+	local savedEspDist = safeGetAttribute(player, "Zendanra_EspMaxDist")
+	if typeof(savedEspDist) == "number" then
+		State.espMaxDistance = math.clamp(math.floor(savedEspDist + 0.5), ESP_CONSTANTS.distMin, ESP_CONSTANTS.distMax)
 	end
 end
 
 local function savePersistedState()
-	player:SetAttribute("Zendanra_Lang", State.language)
-	player:SetAttribute("Zendanra_Theme", State.theme)
-	player:SetAttribute("Zendanra_Scale", State.uiScale)
-	player:SetAttribute("Zendanra_Anim", State.animations)
-	player:SetAttribute("Zendanra_Compact", State.compact)
+	safeSetAttribute(player, "Zendanra_Lang", State.language)
+	safeSetAttribute(player, "Zendanra_Theme", State.theme)
+	safeSetAttribute(player, "Zendanra_Scale", State.uiScale)
+	safeSetAttribute(player, "Zendanra_Anim", State.animations)
+	safeSetAttribute(player, "Zendanra_Compact", State.compact)
+	safeSetAttribute(player, "Zendanra_AimEnabled", State.aimEnabled)
+	safeSetAttribute(player, "Zendanra_ShowFov", State.showFov)
+	safeSetAttribute(player, "Zendanra_SmoothAim", State.smoothAim)
+	safeSetAttribute(player, "Zendanra_VelocityPredict", State.velocityPredict)
+	safeSetAttribute(player, "Zendanra_RequireLOS", State.requireLineOfSight)
+	safeSetAttribute(player, "Zendanra_Fov", State.fov)
+	safeSetAttribute(player, "Zendanra_Smoothness", State.smoothness)
+	safeSetAttribute(player, "Zendanra_AimRegion", State.region)
+	safeSetAttribute(player, "Zendanra_EspEnabled", State.espEnabled)
+	safeSetAttribute(player, "Zendanra_EspBox", State.espBox)
+	safeSetAttribute(player, "Zendanra_EspName", State.espName)
+	safeSetAttribute(player, "Zendanra_EspHealth", State.espHealth)
+	safeSetAttribute(player, "Zendanra_EspSkeleton", State.espSkeleton)
+	safeSetAttribute(player, "Zendanra_EspTracer", State.espTracer)
+	safeSetAttribute(player, "Zendanra_EspTeamCheck", State.espTeamCheck)
+	safeSetAttribute(player, "Zendanra_EspMaxDist", State.espMaxDistance)
 end
 
 local function tr(key)
@@ -371,10 +480,67 @@ local function onLanguageChange(fn)
 	table.insert(languageListeners, fn)
 end
 
+local ResourceManager = {
+	alive = true,
+	connections = {},
+	tweens = {},
+	updaters = {},
+}
+
+function ResourceManager:connect(signal, callback, context)
+	if not self.alive or not signal then return nil end
+	local conn = signal:Connect(function(...)
+		if self.alive then
+			safeCall(context or "Signal", callback, ...)
+		end
+	end)
+	table.insert(self.connections, conn)
+	return conn
+end
+
+function ResourceManager:trackTween(tweenObj)
+	if not tweenObj then return nil end
+	self.tweens[tweenObj] = true
+	tweenObj.Completed:Once(function()
+		self.tweens[tweenObj] = nil
+	end)
+	return tweenObj
+end
+
+function ResourceManager:cleanup()
+	if not self.alive then return end
+	self.alive = false
+
+	pcall(function()
+		RunService:UnbindFromRenderStep("ZendanraAimStep")
+	end)
+
+	for _, conn in ipairs(self.connections) do
+		if conn and conn.Connected then
+			conn:Disconnect()
+		end
+	end
+	table.clear(self.connections)
+
+	for tweenObj in pairs(self.tweens) do
+		pcall(function()
+			tweenObj:Cancel()
+		end)
+		self.tweens[tweenObj] = nil
+	end
+
+	table.clear(self.updaters)
+end
+
 local function playTween(object, duration, properties)
+	if not object or not object.Parent then
+		return nil
+	end
 	if not State.animations or duration <= 0 then
 		for key, value in pairs(properties) do
-			object[key] = value
+			pcall(function()
+				object[key] = value
+			end)
 		end
 		return nil
 	end
@@ -406,21 +572,689 @@ local function addStroke(parent, color, thickness, transparency)
 	}, parent)
 end
 
+-- ==================== AIM CONTROLLER ====================
+local AimController = {
+	currentModel = nil,
+	lastAimPos = nil,
+	lastRawPos = nil,
+	lastVelEstimate = Vector3.zero,
+	invalidSince = nil,
+	firingByAttack = false,
+	fireTouchObject = nil,
+	isInsideGuiFn = nil,
+	playerGui = nil,
+	gui = nil,
+}
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+
+local function findFirstPart(model, names)
+	if not model then return nil end
+	for _, name in ipairs(names) do
+		local part = model:FindFirstChild(name)
+		if part and part:IsA("BasePart") then
+			return part
+		end
+	end
+	return nil
+end
+
+local REGION_RESOLVERS = {
+	Head = function(model)
+		return findFirstPart(model, { "Head" })
+	end,
+	Neck = function(model)
+		return findFirstPart(model, { "Head" })
+	end,
+	Body = function(model)
+		return findFirstPart(model, { "UpperTorso", "Torso", "HumanoidRootPart" })
+	end,
+	Legs = function(model)
+		return findFirstPart(model, { "RightUpperLeg", "LeftUpperLeg", "Right Leg", "Left Leg" })
+	end,
+}
+
+function AimController:resetTracking()
+	self.currentModel = nil
+	self.lastAimPos = nil
+	self.lastRawPos = nil
+	self.lastVelEstimate = Vector3.zero
+	self.invalidSince = nil
+end
+
+function AimController:getAimPartAndPos(model)
+	if not model or not model.Parent then
+		return nil, nil
+	end
+	local resolver = REGION_RESOLVERS[State.region]
+	local part = resolver and resolver(model)
+	if not part then
+		part = findFirstPart(model, { "Head", "HumanoidRootPart", "Torso", "UpperTorso" })
+			or model.PrimaryPart
+			or model:FindFirstChildWhichIsA("BasePart")
+	end
+	if not part then
+		return nil, nil
+	end
+
+	local pos = part.Position
+	if State.region == "Neck" and part.Name == "Head" then
+		pos = pos - part.CFrame.UpVector * (part.Size.Y * 0.5)
+	end
+	return part, pos
+end
+
+function AimController:isAlive(model)
+	if not model then return false end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.Health > 0
+end
+
+function AimController:getPlayerFromModel(model)
+	if not model then return nil end
+	local plr = Players:GetPlayerFromCharacter(model)
+	if plr and plr ~= player then
+		return plr
+	end
+	return nil
+end
+
+function AimController:getCandidates()
+	local list = {}
+	local chosen = State.targetPlayer
+	if chosen then
+		if chosen.Parent and chosen ~= player and chosen.Character and chosen.Character.Parent then
+			table.insert(list, chosen.Character)
+		end
+		return list
+	end
+
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other ~= player and other.Character and other.Character.Parent then
+			table.insert(list, other.Character)
+		end
+	end
+	return list
+end
+
+function AimController:getAngleAndDistance(position, cam)
+	local camCF = cam.CFrame
+	local offset = position - camCF.Position
+	local distance = offset.Magnitude
+	if distance < 0.001 then
+		return 0, distance
+	end
+	local cosA = math.clamp(camCF.LookVector:Dot(offset.Unit), -1, 1)
+	return math.deg(math.acos(cosA)), distance
+end
+
+function AimController:hasLineOfSight(position, model, cam)
+	if not State.requireLineOfSight then
+		return true
+	end
+
+	local filter = {}
+	if player.Character then
+		table.insert(filter, player.Character)
+	end
+
+	local origin = cam.CFrame.Position
+	local direction = position - origin
+
+	for _ = 1, 6 do
+		rayParams.FilterDescendantsInstances = filter
+		local result = workspace:Raycast(origin, direction, rayParams)
+		if result == nil or result.Instance:IsDescendantOf(model) then
+			return true
+		end
+		local hit = result.Instance
+		if hit.Transparency >= 0.9 or not hit.CanCollide then
+			table.insert(filter, hit)
+		else
+			return false
+		end
+	end
+
+	return false
+end
+
+function AimController:findBestTarget(cam)
+	local bestModel = nil
+	local bestScore = math.huge
+	for _, model in ipairs(self:getCandidates()) do
+		if self:isAlive(model) and self:getPlayerFromModel(model) then
+			local _, position = self:getAimPartAndPos(model)
+			if position then
+				local angle, distance = self:getAngleAndDistance(position, cam)
+				if angle <= State.fov and distance <= AIM_CONSTANTS.maxDistance and self:hasLineOfSight(position, model, cam) then
+					local score = angle + (distance / AIM_CONSTANTS.maxDistance) * 3.5
+					if score < bestScore then
+						bestModel = model
+						bestScore = score
+					end
+				end
+			end
+		end
+	end
+	return bestModel
+end
+
+function AimController:isStillValid(model, cam)
+	if not model or not model.Parent or not self:isAlive(model) or not self:getPlayerFromModel(model) then
+		return false
+	end
+	if State.targetPlayer and model ~= State.targetPlayer.Character then
+		return false
+	end
+	local _, position = self:getAimPartAndPos(model)
+	if not position then
+		return false
+	end
+	local angle, distance = self:getAngleAndDistance(position, cam)
+	local breakAngle = math.min(State.fov * AIM_CONSTANTS.breakMultiplier, 89)
+	return angle <= breakAngle and distance <= AIM_CONSTANTS.maxDistance and self:hasLineOfSight(position, model, cam)
+end
+
+function AimController:isTouchOnFireControl(pos)
+	if not self.playerGui or not self.playerGui.Parent then
+		return false
+	end
+	local ok, guiObjects = pcall(function()
+		return self.playerGui:GetGuiObjectsAtPosition(pos.X, pos.Y)
+	end)
+	if not ok or typeof(guiObjects) ~= "table" then
+		return false
+	end
+
+	local foundInteractiveControl = false
+	for _, obj in ipairs(guiObjects) do
+		if self.gui and obj:IsDescendantOf(self.gui) then
+			return false
+		end
+		if obj:IsA("GuiButton") then
+			foundInteractiveControl = true
+			local lowerName = string.lower(obj.Name)
+			local lowerParent = obj.Parent and string.lower(obj.Parent.Name) or ""
+			if string.find(lowerName, "jump")
+				or string.find(lowerName, "thumbstick")
+				or string.find(lowerName, "joystick")
+				or string.find(lowerName, "move")
+				or string.find(lowerName, "crouch")
+				or string.find(lowerParent, "touchcontrol")
+			then
+				return false
+			end
+			if string.find(lowerName, "fire")
+				or string.find(lowerName, "shoot")
+				or string.find(lowerName, "attack")
+				or string.find(lowerName, "trigger")
+				or string.find(lowerParent, "fire")
+				or string.find(lowerParent, "shoot")
+			then
+				return true
+			end
+		end
+	end
+
+	return foundInteractiveControl
+end
+
+function AimController:handleInputBegan(input, gameProcessed)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.KeyCode == Enum.KeyCode.ButtonR2 then
+		if not (self.isInsideGuiFn and self.isInsideGuiFn(input.Position)) then
+			self.firingByAttack = true
+		end
+	elseif input.UserInputType == Enum.UserInputType.Touch then
+		if not (self.isInsideGuiFn and self.isInsideGuiFn(input.Position)) and self:isTouchOnFireControl(input.Position) then
+			self.firingByAttack = true
+			self.fireTouchObject = input
+		end
+	end
+end
+
+function AimController:handleInputEnded(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.KeyCode == Enum.KeyCode.ButtonR2 then
+		self.firingByAttack = false
+	elseif input.UserInputType == Enum.UserInputType.Touch then
+		if self.fireTouchObject == nil or input == self.fireTouchObject then
+			self.firingByAttack = false
+			self.fireTouchObject = nil
+		end
+	end
+end
+
+function AimController:isFiringActive()
+	if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+		return true
+	end
+	if self.fireTouchObject and self.fireTouchObject.UserInputState == Enum.UserInputState.End then
+		self.firingByAttack = false
+		self.fireTouchObject = nil
+	end
+	return self.firingByAttack
+end
+
+function AimController:step(dt, cam, circleFrame, circleStroke)
+	local showCircle = State.aimEnabled and State.showFov
+	circleFrame.Visible = showCircle
+	if showCircle then
+		local halfFov = math.rad(cam.FieldOfView) * 0.5
+		local tanHalf = math.max(math.tan(halfFov), 0.0001)
+		local radius = (math.tan(math.rad(State.fov)) / tanHalf) * (cam.ViewportSize.Y * 0.5)
+		local diameter = math.clamp(radius * 2, 16, 4000)
+		circleFrame.Size = UDim2.fromOffset(diameter, diameter)
+		circleStroke.Color = self.currentModel and BASE_COLORS.locked or BASE_COLORS.text
+	end
+
+	if not (State.aimEnabled and self:isFiringActive()) then
+		self:resetTracking()
+		return false
+	end
+
+	local now = os.clock()
+	if self.currentModel then
+		if self:isStillValid(self.currentModel, cam) then
+			self.invalidSince = nil
+		else
+			if not self.invalidSince then
+				self.invalidSince = now
+			elseif (now - self.invalidSince) >= AIM_CONSTANTS.targetSwitchGrace then
+				self:resetTracking()
+			end
+		end
+	end
+
+	if not self.currentModel then
+		self.currentModel = self:findBestTarget(cam)
+		self.invalidSince = nil
+		self.lastAimPos = nil
+		self.lastRawPos = nil
+		self.lastVelEstimate = Vector3.zero
+	end
+
+	if self.currentModel then
+		local part, rawPos = self:getAimPartAndPos(self.currentModel)
+		if part and rawPos then
+			local safeDt = math.clamp(dt, 0.001, 0.05)
+
+			local instVel = part.AssemblyLinearVelocity
+			if self.lastRawPos then
+				local derivedVel = (rawPos - self.lastRawPos) / safeDt
+				local speedDelta = (derivedVel - instVel).Magnitude
+				local blend = (speedDelta > 45) and 0.65 or 0.35
+				instVel = instVel:Lerp(derivedVel, blend)
+			end
+			self.lastRawPos = rawPos
+			self.lastVelEstimate = self.lastVelEstimate:Lerp(instVel, 1 - math.exp(-20 * safeDt))
+
+			local predictedPos = rawPos
+			if State.velocityPredict then
+				local distance = (rawPos - cam.CFrame.Position).Magnitude
+				local leadTime = math.clamp(
+					distance / AIM_CONSTANTS.projectileSpeed,
+					AIM_CONSTANTS.leadTimeMin,
+					AIM_CONSTANTS.leadTimeMax
+				)
+				predictedPos = rawPos + self.lastVelEstimate * leadTime
+			end
+
+			local camCF = cam.CFrame
+			local toTarget = predictedPos - camCF.Position
+			if toTarget.Magnitude > 0.01 then
+				if State.smoothAim then
+					local posAlpha = 1 - math.exp(-30 * safeDt)
+					local smoothedTargetPos = self.lastAimPos and self.lastAimPos:Lerp(predictedPos, posAlpha) or predictedPos
+					self.lastAimPos = smoothedTargetPos
+
+					local goal = CFrame.lookAt(camCF.Position, smoothedTargetPos)
+					local dirToSmoothed = (smoothedTargetPos - camCF.Position).Unit
+					local angleErr = math.deg(math.acos(math.clamp(camCF.LookVector:Dot(dirToSmoothed), -1, 1)))
+					local gain = math.clamp(angleErr / 4.5, 0.55, 1.45)
+					local dynamicSpeed = State.smoothness * gain
+					local rotAlpha = 1 - math.exp(-dynamicSpeed * safeDt)
+					cam.CFrame = camCF:Lerp(goal, rotAlpha)
+				else
+					self.lastAimPos = predictedPos
+					cam.CFrame = CFrame.lookAt(camCF.Position, predictedPos)
+				end
+			end
+			return true
+		end
+	end
+
+	return false
+end
+
+-- ==================== ESP CONTROLLER (GUI THUẦN, KHÔNG PHỤ THUỘC DRAWING API) ====================
+local EspController = {
+	layer = nil,
+	entries = {},
+	activeCount = 0,
+}
+
+local function createEspEntry(targetPlayer)
+	local holder = make("Frame", {
+		Name = "Esp_" .. targetPlayer.Name,
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Visible = false,
+	}, EspController.layer)
+
+	local boxFrame = make("Frame", {
+		Name = "Box",
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Visible = false,
+	}, holder)
+	local boxStroke = addStroke(boxFrame, getAccent().accent, 1.5, 0.08)
+
+	local hpBack = make("Frame", {
+		Name = "HpBack",
+		BackgroundColor3 = Color3.fromRGB(10, 14, 18),
+		BackgroundTransparency = 0.25,
+		BorderSizePixel = 0,
+		Visible = false,
+	}, holder)
+	addCorner(hpBack, 3)
+
+	local hpFill = make("Frame", {
+		Name = "HpFill",
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.fromScale(0, 1),
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = BASE_COLORS.on,
+		BorderSizePixel = 0,
+	}, hpBack)
+	addCorner(hpFill, 3)
+
+	local infoLabel = make("TextLabel", {
+		Name = "Info",
+		AnchorPoint = Vector2.new(0.5, 1),
+		BackgroundTransparency = 1,
+		Text = "",
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+		TextColor3 = BASE_COLORS.text,
+		TextStrokeTransparency = 0.35,
+		TextStrokeColor3 = Color3.fromRGB(8, 12, 16),
+		Visible = false,
+	}, holder)
+
+	local tracerLine = make("Frame", {
+		Name = "Tracer",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BorderSizePixel = 0,
+		BackgroundTransparency = 0.25,
+		Visible = false,
+	}, holder)
+
+	local bonePool = {}
+	for i = 1, #R15_PAIRS do
+		local bone = make("Frame", {
+			Name = "Bone_" .. tostring(i),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			BorderSizePixel = 0,
+			BackgroundTransparency = 0.2,
+			Visible = false,
+		}, holder)
+		table.insert(bonePool, bone)
+	end
+
+	return {
+		player = targetPlayer,
+		holder = holder,
+		boxFrame = boxFrame,
+		boxStroke = boxStroke,
+		hpBack = hpBack,
+		hpFill = hpFill,
+		infoLabel = infoLabel,
+		tracerLine = tracerLine,
+		bonePool = bonePool,
+	}
+end
+
+local function positionLineBetween(lineFrame, a, b, thickness, color)
+	local delta = b - a
+	local length = delta.Magnitude
+	if length < 1 then
+		lineFrame.Visible = false
+		return
+	end
+	local mid = (a + b) * 0.5
+	local angleDeg = math.deg(math.atan2(delta.Y, delta.X))
+	lineFrame.Position = UDim2.fromOffset(mid.X, mid.Y)
+	lineFrame.Size = UDim2.fromOffset(length, thickness or 1.4)
+	lineFrame.Rotation = angleDeg
+	lineFrame.BackgroundColor3 = color
+	lineFrame.Visible = true
+end
+
+local function hideEntryBones(entry)
+	for _, bone in ipairs(entry.bonePool) do
+		bone.Visible = false
+	end
+end
+
+function EspController:ensureEntry(targetPlayer)
+	if not targetPlayer or targetPlayer == player then
+		return nil
+	end
+	if self.entries[targetPlayer] then
+		return self.entries[targetPlayer]
+	end
+	if not self.layer or not self.layer.Parent then
+		return nil
+	end
+	local entry = createEspEntry(targetPlayer)
+	self.entries[targetPlayer] = entry
+	return entry
+end
+
+function EspController:removeEntry(targetPlayer)
+	local entry = self.entries[targetPlayer]
+	if entry then
+		if entry.holder and entry.holder.Parent then
+			entry.holder:Destroy()
+		end
+		self.entries[targetPlayer] = nil
+	end
+end
+
+function EspController:hideAll()
+	self.activeCount = 0
+	for _, entry in pairs(self.entries) do
+		entry.holder.Visible = false
+	end
+end
+
+function EspController:isTeammate(targetPlayer)
+	if not State.espTeamCheck then
+		return false
+	end
+	if player.Team and targetPlayer.Team and player.Team == targetPlayer.Team then
+		return true
+	end
+	if player.TeamColor and targetPlayer.TeamColor and player.TeamColor == targetPlayer.TeamColor then
+		if player.Neutral == false and targetPlayer.Neutral == false then
+			return true
+		end
+	end
+	return false
+end
+
+function EspController:step(cam)
+	if not State.espEnabled or not self.layer or not self.layer.Parent or not cam then
+		self:hideAll()
+		return
+	end
+
+	local viewport = cam.ViewportSize
+	if viewport.X <= 4 or viewport.Y <= 4 then
+		self:hideAll()
+		return
+	end
+
+	local active = 0
+	local accentColor = getAccent().accent
+	local originPos = cam.CFrame.Position
+	local bottomCenter = Vector2.new(viewport.X * 0.5, viewport.Y * 0.96)
+
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other ~= player then
+			local entry = self:ensureEntry(other)
+			local char = other.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local rootPart = char and (findFirstPart(char, { "HumanoidRootPart", "UpperTorso", "Torso" }) or char.PrimaryPart)
+
+			if entry and char and hum and hum.Health > 0 and rootPart and not self:isTeammate(other) then
+				local dist = (rootPart.Position - originPos).Magnitude
+				local rootScreen, onScreen = cam:WorldToViewportPoint(rootPart.Position)
+
+				if dist <= State.espMaxDistance and onScreen and rootScreen.Z > 0 then
+					local headPart = findFirstPart(char, { "Head" })
+					local topWorld = headPart and (headPart.Position + Vector3.new(0, headPart.Size.Y * 0.65, 0))
+						or (rootPart.Position + Vector3.new(0, 2.3, 0))
+					local bottomWorld = rootPart.Position - Vector3.new(0, 3.0, 0)
+
+					local topScreen = cam:WorldToViewportPoint(topWorld)
+					local bottomScreen = cam:WorldToViewportPoint(bottomWorld)
+
+					local boxHeight = math.clamp(math.abs(bottomScreen.Y - topScreen.Y), 16, viewport.Y * 0.9)
+					local boxWidth = math.clamp(boxHeight * 0.58, 12, viewport.X * 0.6)
+					local centerX = rootScreen.X
+					local topY = math.min(topScreen.Y, bottomScreen.Y)
+					local leftX = centerX - boxWidth * 0.5
+
+					local isLocked = (AimController.currentModel == char)
+					local color = isLocked and BASE_COLORS.locked or accentColor
+
+					entry.holder.Visible = true
+					active += 1
+
+					if State.espBox then
+						entry.boxFrame.Position = UDim2.fromOffset(leftX, topY)
+						entry.boxFrame.Size = UDim2.fromOffset(boxWidth, boxHeight)
+						entry.boxStroke.Color = color
+						entry.boxFrame.Visible = true
+					else
+						entry.boxFrame.Visible = false
+					end
+
+					if State.espHealth then
+						local maxHp = math.max(hum.MaxHealth, 1)
+						local ratio = math.clamp(hum.Health / maxHp, 0, 1)
+						entry.hpBack.Position = UDim2.fromOffset(leftX - 6, topY)
+						entry.hpBack.Size = UDim2.fromOffset(3, boxHeight)
+						entry.hpFill.Size = UDim2.fromScale(1, ratio)
+						entry.hpFill.BackgroundColor3 = Color3.fromRGB(235, 95, 95):Lerp(BASE_COLORS.on, ratio)
+						entry.hpBack.Visible = true
+					else
+						entry.hpBack.Visible = false
+					end
+
+					if State.espName then
+						entry.infoLabel.Text = string.format(
+							"%s  •  %dm",
+							other.DisplayName,
+							math.floor(dist + 0.5)
+						)
+						entry.infoLabel.Position = UDim2.fromOffset(centerX, topY - 4)
+						entry.infoLabel.TextColor3 = color
+						entry.infoLabel.Visible = true
+					else
+						entry.infoLabel.Visible = false
+					end
+
+					if State.espTracer then
+						local targetPt = Vector2.new(centerX, topY + boxHeight)
+						positionLineBetween(entry.tracerLine, bottomCenter, targetPt, 1.3, color)
+					else
+						entry.tracerLine.Visible = false
+					end
+
+					if State.espSkeleton then
+						local pairsList = (hum.RigType == Enum.HumanoidRigType.R6) and R6_PAIRS or R15_PAIRS
+						local boneIdx = 0
+						for _, pair in ipairs(pairsList) do
+							local partA = char:FindFirstChild(pair[1])
+							local partB = char:FindFirstChild(pair[2])
+							if partA and partA:IsA("BasePart") and partB and partB:IsA("BasePart") then
+								local pA, visA = cam:WorldToViewportPoint(partA.Position)
+								local pB, visB = cam:WorldToViewportPoint(partB.Position)
+								if visA and visB and pA.Z > 0 and pB.Z > 0 then
+									boneIdx += 1
+									local boneFrame = entry.bonePool[boneIdx]
+									if boneFrame then
+										positionLineBetween(
+											boneFrame,
+											Vector2.new(pA.X, pA.Y),
+											Vector2.new(pB.X, pB.Y),
+											1.2,
+											color
+										)
+									end
+								end
+							end
+						end
+						for i = boneIdx + 1, #entry.bonePool do
+							entry.bonePool[i].Visible = false
+						end
+					else
+						hideEntryBones(entry)
+					end
+				else
+					entry.holder.Visible = false
+				end
+			elseif entry then
+				entry.holder.Visible = false
+			end
+		end
+	end
+
+	self.activeCount = active
+end
+
+-- ==================== KHỞI TẠO GUI ====================
 local gui = Instance.new("ScreenGui")
 gui.Name = GUI_NAME
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.DisplayOrder = 80
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.Parent = playerGui
+gui.Parent = parentContainer
+
+local espLayer = make("Frame", {
+	Name = "EspOverlay",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	ZIndex = 10,
+}, gui)
+EspController.layer = espLayer
+
+AimController.playerGui = player:FindFirstChildOfClass("PlayerGui") or player:FindFirstChild("PlayerGui")
+AimController.gui = gui
 
 gui.Destroying:Connect(function()
 	ResourceManager:cleanup()
 end)
 
+local fovCircle = make("Frame", {
+	Name = "FovCircle",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(100, 100),
+	BackgroundTransparency = 1,
+	Visible = false,
+	ZIndex = 15,
+}, gui)
+addCorner(fovCircle, 999)
+local fovCircleStroke = addStroke(fovCircle, BASE_COLORS.text, 1.5, 0.25)
+
 local BASE_WIDTH = 440
-local EXPANDED_HEIGHT = 345
-local COMPACT_HEIGHT = 295
+local EXPANDED_HEIGHT = 355
+local COMPACT_HEIGHT = 305
 local COLLAPSED_HEIGHT = 66
 
 local function getTargetHeight()
@@ -674,7 +1508,7 @@ local function createToggle(parent, labelKey, getInitial, onChanged, order)
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -10, 0.5, 0),
 		Size = UDim2.fromOffset(54, 26),
-		BackgroundColor3 = getInitial() and getAccent().accentDark or BASE_COLORS.surface3,
+		BackgroundColor3 = getInitial() and BASE_COLORS.on or BASE_COLORS.off,
 		Text = getInitial() and tr("on") or tr("off"),
 		Font = Enum.Font.GothamBold,
 		TextSize = 9,
@@ -687,7 +1521,7 @@ local function createToggle(parent, labelKey, getInitial, onChanged, order)
 		local active = getInitial()
 		button.Text = active and tr("on") or tr("off")
 		playTween(button, 0.16, {
-			BackgroundColor3 = active and getAccent().accentDark or BASE_COLORS.surface3
+			BackgroundColor3 = active and BASE_COLORS.on or BASE_COLORS.off
 		})
 	end
 
@@ -696,7 +1530,6 @@ local function createToggle(parent, labelKey, getInitial, onChanged, order)
 		syncVisual()
 	end, "Toggle_" .. labelKey)
 
-	onThemeChange(syncVisual)
 	onLanguageChange(function()
 		label.Text = tr(labelKey)
 		syncVisual()
@@ -705,6 +1538,7 @@ local function createToggle(parent, labelKey, getInitial, onChanged, order)
 	return syncVisual
 end
 
+-- ==================== TRANG DASHBOARD ====================
 local dashboard = createPage("Dashboard")
 local dashWelcome = createCard(dashboard, 76, 1)
 local welcomeTitle = make("TextLabel", {
@@ -730,9 +1564,11 @@ local welcomeSub = make("TextLabel", {
 
 local statusValue = createMetricCard(dashboard, "status", "●  " .. tr("ready"), 2)
 local playerCountValue = createMetricCard(dashboard, "playerCount", tostring(#Players:GetPlayers()), 3)
+local aimStatusValue = createMetricCard(dashboard, "aimStatusLabel", tr("aimIdle"), 4)
+local espStatusValue = createMetricCard(dashboard, "espStatusLabel", tr("espOff"), 5)
 
 local quickLabel = make("TextLabel", {
-	LayoutOrder = 4,
+	LayoutOrder = 6,
 	Size = UDim2.new(1, 0, 0, 16),
 	BackgroundTransparency = 1,
 	Text = tr("quick"),
@@ -742,22 +1578,34 @@ local quickLabel = make("TextLabel", {
 	TextXAlignment = Enum.TextXAlignment.Left,
 }, dashboard)
 
-local quickCard = createCard(dashboard, 52, 5)
-local quickDiagBtn = make("TextButton", {
+local quickCard = createCard(dashboard, 52, 7)
+local quickAimBtn = make("TextButton", {
 	Position = UDim2.fromOffset(10, 8),
-	Size = UDim2.new(0.5, -14, 0, 35),
+	Size = UDim2.new(0.333, -10, 0, 35),
 	BackgroundColor3 = BASE_COLORS.surface2,
-	Text = "⚙  " .. tr("diagnostics"),
+	Text = "◎  " .. tr("aim"),
 	Font = Enum.Font.GothamSemibold,
 	TextSize = 10,
 	TextColor3 = BASE_COLORS.text,
 	AutoButtonColor = false,
 }, quickCard)
-addCorner(quickDiagBtn, 8)
+addCorner(quickAimBtn, 8)
+
+local quickEspBtn = make("TextButton", {
+	Position = UDim2.new(0.333, 2, 0, 8),
+	Size = UDim2.new(0.333, -8, 0, 35),
+	BackgroundColor3 = BASE_COLORS.surface2,
+	Text = "◈  " .. tr("esp"),
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 10,
+	TextColor3 = BASE_COLORS.text,
+	AutoButtonColor = false,
+}, quickCard)
+addCorner(quickEspBtn, 8)
 
 local quickLangBtn = make("TextButton", {
-	Position = UDim2.new(0.5, 4, 0, 8),
-	Size = UDim2.new(0.5, -14, 0, 35),
+	Position = UDim2.new(0.666, 2, 0, 8),
+	Size = UDim2.new(0.334, -10, 0, 35),
 	BackgroundColor3 = BASE_COLORS.surface2,
 	Text = "文  " .. tr("language"),
 	Font = Enum.Font.GothamSemibold,
@@ -767,15 +1615,574 @@ local quickLangBtn = make("TextButton", {
 }, quickCard)
 addCorner(quickLangBtn, 8)
 
+local function refreshDashboardEspStatus()
+	if not State.espEnabled then
+		espStatusValue.Text = tr("espOff")
+	elseif EspController.activeCount > 0 then
+		espStatusValue.Text = tr("espActive") .. " (" .. tostring(EspController.activeCount) .. ")"
+	else
+		espStatusValue.Text = tr("espActive")
+	end
+end
+
 onLanguageChange(function()
 	welcomeTitle.Text = tr("welcome")
 	welcomeSub.Text = tr("subtitle")
 	statusValue.Text = "●  " .. tr("ready")
+	aimStatusValue.Text = AimController.currentModel and tr("aimLocking") or tr("aimIdle")
+	refreshDashboardEspStatus()
 	quickLabel.Text = tr("quick")
-	quickDiagBtn.Text = "⚙  " .. tr("diagnostics")
+	quickAimBtn.Text = "◎  " .. tr("aim")
+	quickEspBtn.Text = "◈  " .. tr("esp")
 	quickLangBtn.Text = "文  " .. tr("language")
 end)
 
+-- ==================== TRANG AIM ====================
+local aimPage = createPage("Aim")
+local aimIntro = createCard(aimPage, 58, 1)
+local aimTitle = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 8),
+	Size = UDim2.new(1, -24, 0, 19),
+	BackgroundTransparency = 1,
+	Text = tr("aimTitle"),
+	Font = Enum.Font.GothamBold,
+	TextSize = 12,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, aimIntro)
+local aimDesc = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 29),
+	Size = UDim2.new(1, -24, 0, 20),
+	BackgroundTransparency = 1,
+	Text = tr("aimDesc"),
+	Font = Enum.Font.Gotham,
+	TextSize = 9,
+	TextColor3 = BASE_COLORS.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextWrapped = true,
+}, aimIntro)
+
+local syncAimToggle = createToggle(
+	aimPage,
+	"enableAim",
+	function() return State.aimEnabled end,
+	function(val)
+		State.aimEnabled = val
+		if not val then
+			AimController:resetTracking()
+		end
+		savePersistedState()
+	end,
+	2
+)
+
+local syncSmoothToggle = createToggle(
+	aimPage,
+	"smoothAim",
+	function() return State.smoothAim end,
+	function(val)
+		State.smoothAim = val
+		savePersistedState()
+	end,
+	3
+)
+
+local syncPredictToggle = createToggle(
+	aimPage,
+	"predictAim",
+	function() return State.velocityPredict end,
+	function(val)
+		State.velocityPredict = val
+		savePersistedState()
+	end,
+	4
+)
+
+local syncLosToggle = createToggle(
+	aimPage,
+	"visCheck",
+	function() return State.requireLineOfSight end,
+	function(val)
+		State.requireLineOfSight = val
+		savePersistedState()
+	end,
+	5
+)
+
+local syncShowFovToggle = createToggle(
+	aimPage,
+	"showFov",
+	function() return State.showFov end,
+	function(val)
+		State.showFov = val
+		savePersistedState()
+	end,
+	6
+)
+
+local aimFovCard = createCard(aimPage, 74, 7)
+local aimFovLabel = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 8),
+	Size = UDim2.new(1, -24, 0, 17),
+	BackgroundTransparency = 1,
+	Text = tr("fovLabel") .. ": " .. tostring(State.fov) .. "°",
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 11,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, aimFovCard)
+
+local aimFovTrack = make("Frame", {
+	Position = UDim2.fromOffset(13, 42),
+	Size = UDim2.new(1, -26, 0, 5),
+	BackgroundColor3 = BASE_COLORS.surface3,
+	BorderSizePixel = 0,
+}, aimFovCard)
+addCorner(aimFovTrack, 5)
+
+local aimFovFill = make("Frame", {
+	Size = UDim2.fromScale(0.25, 1),
+	BackgroundColor3 = getAccent().accent,
+	BorderSizePixel = 0,
+}, aimFovTrack)
+addCorner(aimFovFill, 5)
+
+local aimFovKnob = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.25, 0.5),
+	Size = UDim2.fromOffset(13, 13),
+	BackgroundColor3 = BASE_COLORS.text,
+	BorderSizePixel = 0,
+}, aimFovTrack)
+addCorner(aimFovKnob, 7)
+
+local aimFovHitbox = make("TextButton", {
+	Position = UDim2.fromOffset(8, 25),
+	Size = UDim2.new(1, -16, 0, 36),
+	BackgroundTransparency = 1,
+	Text = "",
+	AutoButtonColor = false,
+}, aimFovCard)
+
+local aimSmoothCard = createCard(aimPage, 74, 8)
+local aimSmoothLabel = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 8),
+	Size = UDim2.new(1, -24, 0, 17),
+	BackgroundTransparency = 1,
+	Text = tr("smoothLabel") .. ": " .. tostring(State.smoothness),
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 11,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, aimSmoothCard)
+
+local aimSmoothTrack = make("Frame", {
+	Position = UDim2.fromOffset(13, 42),
+	Size = UDim2.new(1, -26, 0, 5),
+	BackgroundColor3 = BASE_COLORS.surface3,
+	BorderSizePixel = 0,
+}, aimSmoothCard)
+addCorner(aimSmoothTrack, 5)
+
+local aimSmoothFill = make("Frame", {
+	Size = UDim2.fromScale(0.4, 1),
+	BackgroundColor3 = getAccent().accent,
+	BorderSizePixel = 0,
+}, aimSmoothTrack)
+addCorner(aimSmoothFill, 5)
+
+local aimSmoothKnob = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.4, 0.5),
+	Size = UDim2.fromOffset(13, 13),
+	BackgroundColor3 = BASE_COLORS.text,
+	BorderSizePixel = 0,
+}, aimSmoothTrack)
+addCorner(aimSmoothKnob, 7)
+
+local aimSmoothHitbox = make("TextButton", {
+	Position = UDim2.fromOffset(8, 25),
+	Size = UDim2.new(1, -16, 0, 36),
+	BackgroundTransparency = 1,
+	Text = "",
+	AutoButtonColor = false,
+}, aimSmoothCard)
+
+local aimRegionCard = createCard(aimPage, 72, 9)
+local aimRegionTitle = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 8),
+	Size = UDim2.new(1, -24, 0, 16),
+	BackgroundTransparency = 1,
+	Text = tr("regionLabel"),
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 11,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, aimRegionCard)
+
+local regionSpecs = {
+	{ key = "Head", langKey = "regHead" },
+	{ key = "Neck", langKey = "regNeck" },
+	{ key = "Body", langKey = "regBody" },
+	{ key = "Legs", langKey = "regLegs" },
+}
+local regionButtons = {}
+
+local function syncRegionButtons()
+	local accent = getAccent()
+	for _, spec in ipairs(regionSpecs) do
+		local btn = regionButtons[spec.key]
+		if btn then
+			local selected = (State.region == spec.key)
+			btn.BackgroundColor3 = selected and accent.accentDark or BASE_COLORS.surface2
+			btn.TextColor3 = selected and BASE_COLORS.text or BASE_COLORS.muted
+			btn.Text = tr(spec.langKey)
+		end
+	end
+end
+
+for idx, spec in ipairs(regionSpecs) do
+	local btn = make("TextButton", {
+		Position = UDim2.new(0, 12 + (idx - 1) * 63, 0, 32),
+		Size = UDim2.new(0.25, -13, 0, 28),
+		BackgroundColor3 = (State.region == spec.key) and getAccent().accentDark or BASE_COLORS.surface2,
+		Text = tr(spec.langKey),
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+		TextColor3 = (State.region == spec.key) and BASE_COLORS.text or BASE_COLORS.muted,
+		AutoButtonColor = false,
+	}, aimRegionCard)
+	addCorner(btn, 7)
+	regionButtons[spec.key] = btn
+
+	ResourceManager:connect(btn.Activated, function()
+		State.region = spec.key
+		AimController:resetTracking()
+		syncRegionButtons()
+		savePersistedState()
+	end, "AimRegion_" .. spec.key)
+end
+
+local aimTargetCard = createCard(aimPage, 88, 10)
+local aimTargetTitle = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 8),
+	Size = UDim2.new(1, -24, 0, 16),
+	BackgroundTransparency = 1,
+	Text = tr("targetLabel"),
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 11,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, aimTargetCard)
+
+local targetSelectBtn = make("TextButton", {
+	Position = UDim2.fromOffset(12, 30),
+	Size = UDim2.new(1, -24, 0, 26),
+	BackgroundColor3 = BASE_COLORS.surface2,
+	Text = tr("targetAll"),
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 10,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextTruncate = Enum.TextTruncate.AtEnd,
+	AutoButtonColor = false,
+}, aimTargetCard)
+addCorner(targetSelectBtn, 7)
+make("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, targetSelectBtn)
+
+local targetListFrame = make("ScrollingFrame", {
+	Position = UDim2.fromOffset(12, 58),
+	Size = UDim2.new(1, -24, 0, 96),
+	BackgroundColor3 = BASE_COLORS.surface2,
+	BorderSizePixel = 0,
+	ScrollBarThickness = 3,
+	CanvasSize = UDim2.fromOffset(0, 0),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	Visible = false,
+	ZIndex = 20,
+}, aimTargetCard)
+addCorner(targetListFrame, 7)
+addStroke(targetListFrame, getAccent().accentDark, 1, 0.25)
+make("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, targetListFrame)
+make("UIPadding", {
+	PaddingTop = UDim.new(0, 4),
+	PaddingBottom = UDim.new(0, 4),
+	PaddingLeft = UDim.new(0, 4),
+	PaddingRight = UDim.new(0, 4),
+}, targetListFrame)
+
+local function syncTargetButtonText()
+	if State.targetPlayer and State.targetPlayer.Parent then
+		targetSelectBtn.Text = State.targetPlayer.DisplayName .. " (@" .. State.targetPlayer.Name .. ")"
+	else
+		State.targetPlayer = nil
+		targetSelectBtn.Text = tr("targetAll")
+	end
+end
+
+local function rebuildTargetOptions(excludedPlayer)
+	for _, child in ipairs(targetListFrame:GetChildren()) do
+		if child:IsA("TextButton") then
+			child:Destroy()
+		end
+	end
+
+	local options = { { label = tr("targetAll"), plr = nil } }
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other ~= player and other ~= excludedPlayer then
+			table.insert(options, {
+				label = other.DisplayName .. " (@" .. other.Name .. ")",
+				plr = other,
+			})
+		end
+	end
+
+	for idx, opt in ipairs(options) do
+		local isSelected = (State.targetPlayer == opt.plr)
+		local itemBtn = make("TextButton", {
+			LayoutOrder = idx,
+			Size = UDim2.new(1, 0, 0, 24),
+			BackgroundColor3 = isSelected and getAccent().accentDark or BASE_COLORS.surface3,
+			Text = opt.label,
+			Font = Enum.Font.GothamSemibold,
+			TextSize = 10,
+			TextColor3 = BASE_COLORS.text,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			AutoButtonColor = false,
+			ZIndex = 21,
+		}, targetListFrame)
+		addCorner(itemBtn, 6)
+		make("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, itemBtn)
+
+		ResourceManager:connect(itemBtn.Activated, function()
+			State.targetPlayer = opt.plr
+			AimController:resetTracking()
+			syncTargetButtonText()
+			targetListFrame.Visible = false
+			aimTargetCard.Size = UDim2.new(1, 0, 0, 88)
+		end, "TargetOpt_" .. tostring(idx))
+	end
+end
+
+ResourceManager:connect(targetSelectBtn.Activated, function()
+	rebuildTargetOptions(nil)
+	local nextVis = not targetListFrame.Visible
+	targetListFrame.Visible = nextVis
+	aimTargetCard.Size = UDim2.new(1, 0, 0, nextVis and 164 or 88)
+end, "ToggleTargetList")
+
+local function applyFovValue(val, shouldSave)
+	State.fov = math.clamp(math.floor(val + 0.5), AIM_CONSTANTS.fovMin, AIM_CONSTANTS.fovMax)
+	local ratio = (State.fov - AIM_CONSTANTS.fovMin) / (AIM_CONSTANTS.fovMax - AIM_CONSTANTS.fovMin)
+	aimFovFill.Size = UDim2.fromScale(ratio, 1)
+	aimFovKnob.Position = UDim2.fromScale(ratio, 0.5)
+	aimFovLabel.Text = tr("fovLabel") .. ": " .. tostring(State.fov) .. "°"
+	if shouldSave then
+		savePersistedState()
+	end
+end
+
+local function applySmoothValue(val, shouldSave)
+	State.smoothness = math.clamp(math.floor(val + 0.5), AIM_CONSTANTS.smoothMin, AIM_CONSTANTS.smoothMax)
+	local ratio = (State.smoothness - AIM_CONSTANTS.smoothMin) / (AIM_CONSTANTS.smoothMax - AIM_CONSTANTS.smoothMin)
+	aimSmoothFill.Size = UDim2.fromScale(ratio, 1)
+	aimSmoothKnob.Position = UDim2.fromScale(ratio, 0.5)
+	aimSmoothLabel.Text = tr("smoothLabel") .. ": " .. tostring(State.smoothness)
+	if shouldSave then
+		savePersistedState()
+	end
+end
+
+onThemeChange(function(accent)
+	aimFovFill.BackgroundColor3 = accent.accent
+	aimSmoothFill.BackgroundColor3 = accent.accent
+	syncRegionButtons()
+end)
+
+onLanguageChange(function()
+	aimTitle.Text = tr("aimTitle")
+	aimDesc.Text = tr("aimDesc")
+	aimFovLabel.Text = tr("fovLabel") .. ": " .. tostring(State.fov) .. "°"
+	aimSmoothLabel.Text = tr("smoothLabel") .. ": " .. tostring(State.smoothness)
+	aimRegionTitle.Text = tr("regionLabel")
+	aimTargetTitle.Text = tr("targetLabel")
+	syncRegionButtons()
+	syncTargetButtonText()
+end)
+
+-- ==================== TRANG ESP ====================
+local espPage = createPage("ESP")
+local espIntro = createCard(espPage, 58, 1)
+local espTitle = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 8),
+	Size = UDim2.new(1, -24, 0, 19),
+	BackgroundTransparency = 1,
+	Text = tr("espTitle"),
+	Font = Enum.Font.GothamBold,
+	TextSize = 12,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, espIntro)
+local espDesc = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 29),
+	Size = UDim2.new(1, -24, 0, 20),
+	BackgroundTransparency = 1,
+	Text = tr("espDesc"),
+	Font = Enum.Font.Gotham,
+	TextSize = 9,
+	TextColor3 = BASE_COLORS.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextWrapped = true,
+}, espIntro)
+
+local syncEspToggle = createToggle(
+	espPage,
+	"espEnable",
+	function() return State.espEnabled end,
+	function(val)
+		State.espEnabled = val
+		if not val then
+			EspController:hideAll()
+		end
+		refreshDashboardEspStatus()
+		savePersistedState()
+	end,
+	2
+)
+
+local syncEspBoxToggle = createToggle(
+	espPage,
+	"espBox",
+	function() return State.espBox end,
+	function(val)
+		State.espBox = val
+		savePersistedState()
+	end,
+	3
+)
+
+local syncEspNameToggle = createToggle(
+	espPage,
+	"espName",
+	function() return State.espName end,
+	function(val)
+		State.espName = val
+		savePersistedState()
+	end,
+	4
+)
+
+local syncEspHealthToggle = createToggle(
+	espPage,
+	"espHealth",
+	function() return State.espHealth end,
+	function(val)
+		State.espHealth = val
+		savePersistedState()
+	end,
+	5
+)
+
+local syncEspSkeletonToggle = createToggle(
+	espPage,
+	"espSkeleton",
+	function() return State.espSkeleton end,
+	function(val)
+		State.espSkeleton = val
+		savePersistedState()
+	end,
+	6
+)
+
+local syncEspTracerToggle = createToggle(
+	espPage,
+	"espTracer",
+	function() return State.espTracer end,
+	function(val)
+		State.espTracer = val
+		savePersistedState()
+	end,
+	7
+)
+
+local syncEspTeamToggle = createToggle(
+	espPage,
+	"espTeamCheck",
+	function() return State.espTeamCheck end,
+	function(val)
+		State.espTeamCheck = val
+		savePersistedState()
+	end,
+	8
+)
+
+local espDistCard = createCard(espPage, 74, 9)
+local espDistLabel = make("TextLabel", {
+	Position = UDim2.fromOffset(12, 8),
+	Size = UDim2.new(1, -24, 0, 17),
+	BackgroundTransparency = 1,
+	Text = tr("espMaxDist") .. ": " .. tostring(State.espMaxDistance) .. "m",
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 11,
+	TextColor3 = BASE_COLORS.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, espDistCard)
+
+local espDistTrack = make("Frame", {
+	Position = UDim2.fromOffset(13, 42),
+	Size = UDim2.new(1, -26, 0, 5),
+	BackgroundColor3 = BASE_COLORS.surface3,
+	BorderSizePixel = 0,
+}, espDistCard)
+addCorner(espDistTrack, 5)
+
+local espDistFill = make("Frame", {
+	Size = UDim2.fromScale(0.46, 1),
+	BackgroundColor3 = getAccent().accent,
+	BorderSizePixel = 0,
+}, espDistTrack)
+addCorner(espDistFill, 5)
+
+local espDistKnob = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.46, 0.5),
+	Size = UDim2.fromOffset(13, 13),
+	BackgroundColor3 = BASE_COLORS.text,
+	BorderSizePixel = 0,
+}, espDistTrack)
+addCorner(espDistKnob, 7)
+
+local espDistHitbox = make("TextButton", {
+	Position = UDim2.fromOffset(8, 25),
+	Size = UDim2.new(1, -16, 0, 36),
+	BackgroundTransparency = 1,
+	Text = "",
+	AutoButtonColor = false,
+}, espDistCard)
+
+local function applyEspDistValue(val, shouldSave)
+	State.espMaxDistance = math.clamp(math.floor(val + 0.5), ESP_CONSTANTS.distMin, ESP_CONSTANTS.distMax)
+	local ratio = (State.espMaxDistance - ESP_CONSTANTS.distMin) / (ESP_CONSTANTS.distMax - ESP_CONSTANTS.distMin)
+	espDistFill.Size = UDim2.fromScale(ratio, 1)
+	espDistKnob.Position = UDim2.fromScale(ratio, 0.5)
+	espDistLabel.Text = tr("espMaxDist") .. ": " .. tostring(State.espMaxDistance) .. "m"
+	if shouldSave then
+		savePersistedState()
+	end
+end
+
+onThemeChange(function(accent)
+	espDistFill.BackgroundColor3 = accent.accent
+end)
+
+onLanguageChange(function()
+	espTitle.Text = tr("espTitle")
+	espDesc.Text = tr("espDesc")
+	espDistLabel.Text = tr("espMaxDist") .. ": " .. tostring(State.espMaxDistance) .. "m"
+end)
+
+-- ==================== TRANG DIAGNOSTICS ====================
 local diagnosticsPage = createPage("Diagnostics")
 local diagIntro = createCard(diagnosticsPage, 60, 1)
 local diagTitle = make("TextLabel", {
@@ -809,6 +2216,7 @@ onLanguageChange(function()
 	diagDesc.Text = tr("diagDesc")
 end)
 
+-- ==================== TRANG APPEARANCE ====================
 local appearancePage = createPage("Appearance")
 local appIntro = createCard(appearancePage, 60, 1)
 local appTitle = make("TextLabel", {
@@ -845,9 +2253,11 @@ local themeTitle = make("TextLabel", {
 }, themeCard)
 
 local themeButtons = {}
+local themeSwatchButtons = {}
 local themeOrder = { "Emerald", "Blue", "Violet", "Crimson" }
 for index, name in ipairs(themeOrder) do
 	local swatch = make("TextButton", {
+		Name = "Theme_" .. name,
 		Position = UDim2.fromOffset(12 + (index - 1) * 43, 36),
 		Size = UDim2.fromOffset(34, 34),
 		BackgroundColor3 = THEMES[name].accent,
@@ -857,6 +2267,7 @@ for index, name in ipairs(themeOrder) do
 	addCorner(swatch, 10)
 	local outline = addStroke(swatch, BASE_COLORS.text, 2, name == State.theme and 0 or 1)
 	themeButtons[name] = outline
+	themeSwatchButtons[name] = swatch
 end
 
 local scaleCard = createCard(appearancePage, 80, 3)
@@ -917,6 +2328,7 @@ onLanguageChange(function()
 	scaleTitle.Text = tr("scale") .. "  •  " .. tostring(math.floor(State.uiScale * 100 + 0.5)) .. "%"
 end)
 
+-- ==================== TRANG SETTINGS ====================
 local settingsPage = createPage("Settings")
 local setIntro = createCard(settingsPage, 60, 1)
 local setTitle = make("TextLabel", {
@@ -1011,6 +2423,7 @@ onLanguageChange(function()
 	resetButton.Text = tr("reset")
 end)
 
+-- Toast thông báo
 local toast = make("Frame", {
 	AnchorPoint = Vector2.new(0.5, 1),
 	Position = UDim2.new(0.5, 0, 1, 48),
@@ -1099,6 +2512,8 @@ end)
 
 local navKeys = {
 	Dashboard = "dashboard",
+	Aim = "aim",
+	ESP = "esp",
 	Diagnostics = "diagnostics",
 	Appearance = "appearance",
 	Settings = "settings",
@@ -1108,7 +2523,7 @@ local function makeNav(name, order)
 	local button = make("TextButton", {
 		Name = name,
 		LayoutOrder = order,
-		Size = UDim2.new(1, 0, 0, 34),
+		Size = UDim2.new(1, 0, 0, 30),
 		BackgroundColor3 = BASE_COLORS.surface2,
 		Text = "  " .. tr(navKeys[name]),
 		Font = Enum.Font.GothamSemibold,
@@ -1126,9 +2541,11 @@ local function makeNav(name, order)
 end
 
 makeNav("Dashboard", 1)
-makeNav("Diagnostics", 2)
-makeNav("Appearance", 3)
-makeNav("Settings", 4)
+makeNav("Aim", 2)
+makeNav("ESP", 3)
+makeNav("Diagnostics", 4)
+makeNav("Appearance", 5)
+makeNav("Settings", 6)
 
 onLanguageChange(function()
 	for name, button in pairs(navButtons) do
@@ -1136,8 +2553,30 @@ onLanguageChange(function()
 	end
 end)
 
+local function isPointInsideGui(pos)
+	if not gui or not gui.Parent or not root or not root.Visible then
+		return false
+	end
+	local p = Vector2.new(pos.X, pos.Y)
+	local topLeft = root.AbsolutePosition
+	local bottomRight = topLeft + root.AbsoluteSize
+	if p.X >= topLeft.X and p.X <= bottomRight.X and p.Y >= topLeft.Y and p.Y <= bottomRight.Y then
+		return true
+	end
+	if targetListFrame.Visible then
+		local lTop = targetListFrame.AbsolutePosition
+		local lBot = lTop + targetListFrame.AbsoluteSize
+		if p.X >= lTop.X and p.X <= lBot.X and p.Y >= lTop.Y and p.Y <= lBot.Y then
+			return true
+		end
+	end
+	return false
+end
+
+AimController.isInsideGuiFn = isPointInsideGui
+
 local function clampRootToViewport()
-	local camera = workspace.CurrentCamera
+	local camera = getCamera()
 	if not camera then return end
 	local viewport = camera.ViewportSize
 	if viewport.X <= 0 or viewport.Y <= 0 then return end
@@ -1160,7 +2599,7 @@ local function clampRootToViewport()
 end
 
 applyResponsiveLayout = function()
-	local camera = workspace.CurrentCamera
+	local camera = getCamera()
 	if not camera then return end
 	local viewport = camera.ViewportSize
 	if viewport.X <= 0 or viewport.Y <= 0 then return end
@@ -1198,8 +2637,7 @@ local function applyScale(value, shouldSave)
 end
 
 local function bindInteractions()
-	for name, _ in pairs(themeButtons) do
-		local swatch = themeCard:GetChildren()[table.find(themeOrder, name) + 1]
+	for name, swatch in pairs(themeSwatchButtons) do
 		if swatch and swatch:IsA("TextButton") then
 			ResourceManager:connect(swatch.Activated, function()
 				State.theme = name
@@ -1228,60 +2666,59 @@ local function bindInteractions()
 		end
 	end, "ScaleInputBegan")
 
-	ResourceManager:connect(UserInputService.InputChanged, function(input)
-		if draggingScale and (
-			input.UserInputType == Enum.UserInputType.MouseMovement
-			or input.UserInputType == Enum.UserInputType.Touch
-		) then
-			updateScaleFromInput(input)
-		end
-	end, "ScaleInputChanged")
-
-	ResourceManager:connect(UserInputService.InputEnded, function(input)
-		if draggingScale and (
-			input.UserInputType == Enum.UserInputType.MouseButton1
-			or input.UserInputType == Enum.UserInputType.Touch
-		) then
-			draggingScale = false
-			savePersistedState()
-		end
-	end, "ScaleInputEnded")
-
-	ResourceManager:connect(UserInputService.InputBegan, function(input, gameProcessed)
-		LogicController:handleInputBegan(input, gameProcessed)
-	end, "LogicControllerInputBegan")
-
-	local function toggleLanguage()
-		State.language = (State.language == "VI") and "EN" or "VI"
-		savePersistedState()
-		broadcastLanguage()
-		notify(tr("saved"))
+	local draggingAimFov = false
+	local function updateAimFovFromInput(input)
+		if aimFovTrack.AbsoluteSize.X <= 0 then return end
+		local ratio = math.clamp(
+			(input.Position.X - aimFovTrack.AbsolutePosition.X) / aimFovTrack.AbsoluteSize.X,
+			0, 1
+		)
+		applyFovValue(AIM_CONSTANTS.fovMin + ratio * (AIM_CONSTANTS.fovMax - AIM_CONSTANTS.fovMin), false)
 	end
 
-	ResourceManager:connect(quickLangBtn.Activated, toggleLanguage, "QuickLang")
-	ResourceManager:connect(langButton.Activated, toggleLanguage, "SettingsLang")
-	ResourceManager:connect(quickDiagBtn.Activated, function()
-		showTab("Diagnostics")
-	end, "QuickDiag")
+	ResourceManager:connect(aimFovHitbox.InputBegan, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			draggingAimFov = true
+			updateAimFovFromInput(input)
+		end
+	end, "AimFovBegan")
 
-	ResourceManager:connect(resetButton.Activated, function()
-		State.theme = "Emerald"
-		State.language = "VI"
-		State.animations = true
-		State.compact = false
-		State.hasCustomPosition = false
-		applyScale(1.0, false)
-		savePersistedState()
-		broadcastTheme()
-		broadcastLanguage()
-		syncAnimToggle()
-		syncCompactToggle()
-		playTween(root, 0.2, {
-			Size = UDim2.fromOffset(BASE_WIDTH, getTargetHeight()),
-			Position = UDim2.fromScale(0.5, 0.5),
-		})
-		notify(tr("resetDone"))
-	end, "ResetDefault")
+	local draggingAimSmooth = false
+	local function updateAimSmoothFromInput(input)
+		if aimSmoothTrack.AbsoluteSize.X <= 0 then return end
+		local ratio = math.clamp(
+			(input.Position.X - aimSmoothTrack.AbsolutePosition.X) / aimSmoothTrack.AbsoluteSize.X,
+			0, 1
+		)
+		applySmoothValue(AIM_CONSTANTS.smoothMin + ratio * (AIM_CONSTANTS.smoothMax - AIM_CONSTANTS.smoothMin), false)
+	end
+
+	ResourceManager:connect(aimSmoothHitbox.InputBegan, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			draggingAimSmooth = true
+			updateAimSmoothFromInput(input)
+		end
+	end, "AimSmoothBegan")
+
+	local draggingEspDist = false
+	local function updateEspDistFromInput(input)
+		if espDistTrack.AbsoluteSize.X <= 0 then return end
+		local ratio = math.clamp(
+			(input.Position.X - espDistTrack.AbsolutePosition.X) / espDistTrack.AbsoluteSize.X,
+			0, 1
+		)
+		applyEspDistValue(ESP_CONSTANTS.distMin + ratio * (ESP_CONSTANTS.distMax - ESP_CONSTANTS.distMin), false)
+	end
+
+	ResourceManager:connect(espDistHitbox.InputBegan, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			draggingEspDist = true
+			updateEspDistFromInput(input)
+		end
+	end, "EspDistBegan")
 
 	local draggingWindow = false
 	local dragStartPos
@@ -1297,11 +2734,25 @@ local function bindInteractions()
 	end, "DragStart")
 
 	ResourceManager:connect(UserInputService.InputChanged, function(input)
-		if draggingWindow and (
-			input.UserInputType == Enum.UserInputType.MouseMovement
+		local isMove = input.UserInputType == Enum.UserInputType.MouseMovement
 			or input.UserInputType == Enum.UserInputType.Touch
-		) then
-			local delta = input.Position - dragStartPos
+		if not isMove then return end
+
+		if draggingScale then
+			updateScaleFromInput(input)
+		end
+		if draggingAimFov then
+			updateAimFovFromInput(input)
+		end
+		if draggingAimSmooth then
+			updateAimSmoothFromInput(input)
+		end
+		if draggingEspDist then
+			updateEspDistFromInput(input)
+		end
+		if draggingWindow then
+			local scaleFactor = math.max(rootScale.Scale, 0.01)
+			local delta = (input.Position - dragStartPos) / scaleFactor
 			State.hasCustomPosition = true
 			root.Position = UDim2.new(
 				windowStartPos.X.Scale,
@@ -1310,17 +2761,111 @@ local function bindInteractions()
 				windowStartPos.Y.Offset + delta.Y
 			)
 		end
-	end, "DragMove")
+	end, "GlobalInputChanged")
+
+	ResourceManager:connect(UserInputService.InputBegan, function(input, gameProcessed)
+		if input.KeyCode == Enum.KeyCode.F4 and not gameProcessed then
+			AimController:resetTracking()
+		end
+		AimController:handleInputBegan(input, gameProcessed)
+	end, "GlobalInputBegan")
 
 	ResourceManager:connect(UserInputService.InputEnded, function(input)
-		if draggingWindow and (
-			input.UserInputType == Enum.UserInputType.MouseButton1
-			or input.UserInputType == Enum.UserInputType.Touch
-		) then
-			draggingWindow = false
-			clampRootToViewport()
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			if draggingScale then
+				draggingScale = false
+				savePersistedState()
+			end
+			if draggingAimFov then
+				draggingAimFov = false
+				savePersistedState()
+			end
+			if draggingAimSmooth then
+				draggingAimSmooth = false
+				savePersistedState()
+			end
+			if draggingEspDist then
+				draggingEspDist = false
+				savePersistedState()
+			end
+			if draggingWindow then
+				draggingWindow = false
+				clampRootToViewport()
+			end
 		end
-	end, "DragEnd")
+		AimController:handleInputEnded(input)
+	end, "GlobalInputEnded")
+
+	local function toggleLanguage()
+		State.language = (State.language == "VI") and "EN" or "VI"
+		savePersistedState()
+		broadcastLanguage()
+		notify(tr("saved"))
+	end
+
+	ResourceManager:connect(quickLangBtn.Activated, toggleLanguage, "QuickLang")
+	ResourceManager:connect(langButton.Activated, toggleLanguage, "SettingsLang")
+	ResourceManager:connect(quickAimBtn.Activated, function()
+		showTab("Aim")
+	end, "QuickAim")
+	ResourceManager:connect(quickEspBtn.Activated, function()
+		showTab("ESP")
+	end, "QuickEsp")
+
+	ResourceManager:connect(resetButton.Activated, function()
+		State.theme = "Emerald"
+		State.language = "VI"
+		State.animations = true
+		State.compact = false
+		State.hasCustomPosition = false
+		State.aimEnabled = false
+		State.showFov = true
+		State.smoothAim = true
+		State.velocityPredict = true
+		State.requireLineOfSight = true
+		State.targetPlayer = nil
+		State.espEnabled = false
+		State.espBox = true
+		State.espName = true
+		State.espHealth = true
+		State.espSkeleton = true
+		State.espTracer = false
+		State.espTeamCheck = true
+		AimController:resetTracking()
+		EspController:hideAll()
+
+		applyScale(1.0, false)
+		applyFovValue(25, false)
+		applySmoothValue(18, false)
+		applyEspDistValue(750, false)
+		savePersistedState()
+		broadcastTheme()
+		broadcastLanguage()
+		syncAnimToggle()
+		syncCompactToggle()
+		syncAimToggle()
+		syncSmoothToggle()
+		syncPredictToggle()
+		syncLosToggle()
+		syncShowFovToggle()
+		syncEspToggle()
+		syncEspBoxToggle()
+		syncEspNameToggle()
+		syncEspHealthToggle()
+		syncEspSkeletonToggle()
+		syncEspTracerToggle()
+		syncEspTeamToggle()
+		syncRegionButtons()
+		syncTargetButtonText()
+		refreshDashboardEspStatus()
+
+		playTween(root, 0.2, {
+			Size = UDim2.fromOffset(BASE_WIDTH, getTargetHeight()),
+			Position = UDim2.fromScale(0.5, 0.5),
+		})
+		notify(tr("resetDone"))
+	end, "ResetDefault")
 
 	ResourceManager:connect(collapseButton.Activated, function()
 		State.collapsed = not State.collapsed
@@ -1338,9 +2883,30 @@ local function bindInteractions()
 
 	local function refreshPlayers()
 		playerCountValue.Text = tostring(#Players:GetPlayers())
+		if targetListFrame.Visible then
+			rebuildTargetOptions(nil)
+		end
 	end
-	ResourceManager:connect(Players.PlayerAdded, refreshPlayers, "PlayerAdded")
-	ResourceManager:connect(Players.PlayerRemoving, refreshPlayers, "PlayerRemoving")
+	ResourceManager:connect(Players.PlayerAdded, function(joined)
+		EspController:ensureEntry(joined)
+		refreshPlayers()
+	end, "PlayerAdded")
+	ResourceManager:connect(Players.PlayerRemoving, function(leaving)
+		EspController:removeEntry(leaving)
+		if State.targetPlayer == leaving then
+			State.targetPlayer = nil
+			AimController:resetTracking()
+			syncTargetButtonText()
+		end
+		playerCountValue.Text = tostring(#Players:GetPlayers())
+		rebuildTargetOptions(leaving)
+	end, "PlayerRemoving")
+
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other ~= player then
+			EspController:ensureEntry(other)
+		end
+	end
 
 	local function updateCharacterRig(character)
 		if not character then
@@ -1349,9 +2915,8 @@ local function bindInteractions()
 		end
 		local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 3)
 		if humanoid then
-			local pairsList = LogicController:getRigPairs(character)
-			local jointCount = pairsList and #pairsList or 0
-			rigMetric.Text = string.format("%s (%d)", humanoid.RigType.Name, jointCount)
+			local rigPairs = (humanoid.RigType == Enum.HumanoidRigType.R6) and R6_PAIRS or R15_PAIRS
+			rigMetric.Text = string.format("%s (%d)", humanoid.RigType.Name, #rigPairs)
 		else
 			rigMetric.Text = "Unknown"
 		end
@@ -1364,7 +2929,7 @@ local function bindInteractions()
 		if cameraViewportConn and cameraViewportConn.Connected then
 			cameraViewportConn:Disconnect()
 		end
-		local cam = workspace.CurrentCamera
+		local cam = getCamera()
 		if cam then
 			cameraViewportConn = ResourceManager:connect(
 				cam:GetPropertyChangedSignal("ViewportSize"),
@@ -1377,34 +2942,57 @@ local function bindInteractions()
 	bindCurrentCamera()
 	ResourceManager:connect(workspace:GetPropertyChangedSignal("CurrentCamera"), bindCurrentCamera, "CameraChanged")
 
-	LogicController:bind(function(dt, controller)
-		if not ResourceManager.alive then return end
-		local hasValidSubject = controller.activeSubject ~= nil
-		controller:updateSubjectState(dt, hasValidSubject)
-		for _, updater in ipairs(ResourceManager.updaters) do
-			updater(dt, controller)
-		end
+	pcall(function()
+		RunService:UnbindFromRenderStep("ZendanraAimStep")
 	end)
 
 	local frameCount = 0
 	local elapsed = 0
-	ResourceManager:connect(RunService.RenderStepped, function(dt)
-		frameCount += 1
-		elapsed += dt
-		if elapsed >= 0.5 then
-			local fps = math.floor((frameCount / elapsed) + 0.5)
-			fpsMetric.Text = tostring(fps) .. " FPS"
+	local lastLockedState = false
+	local lastEspText = ""
 
-			local pingMs = 0
-			pcall(function()
-				pingMs = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue() + 0.5)
-			end)
-			pingMetric.Text = tostring(pingMs) .. " ms"
+	pcall(function()
+		RunService:BindToRenderStep("ZendanraAimStep", Enum.RenderPriority.Camera.Value + 5, function(dt)
+			if not ResourceManager.alive then return end
 
-			frameCount = 0
-			elapsed = 0
-		end
-	end, "DiagnosticsLoop")
+			frameCount += 1
+			elapsed += dt
+			if elapsed >= 0.5 then
+				local fps = math.floor((frameCount / elapsed) + 0.5)
+				fpsMetric.Text = tostring(fps) .. " FPS"
+
+				local pingMs = 0
+				pcall(function()
+					pingMs = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue() + 0.5)
+				end)
+				pingMetric.Text = tostring(pingMs) .. " ms"
+
+				frameCount = 0
+				elapsed = 0
+			end
+
+			local cam = getCamera()
+			if cam then
+				safeCall("AimStep", function()
+					local locked = AimController:step(dt, cam, fovCircle, fovCircleStroke)
+					if locked ~= lastLockedState then
+						lastLockedState = locked
+						aimStatusValue.Text = locked and tr("aimLocking") or tr("aimIdle")
+						aimStatusValue.TextColor3 = locked and BASE_COLORS.locked or getAccent().accent
+					end
+				end)
+
+				safeCall("EspStep", function()
+					EspController:step(cam)
+					refreshDashboardEspStatus()
+					if espStatusValue.Text ~= lastEspText then
+						lastEspText = espStatusValue.Text
+						espStatusValue.TextColor3 = State.espEnabled and getAccent().accent or BASE_COLORS.muted
+					end
+				end)
+			end
+		end)
+	end)
 end
 
 local loading = make("Frame", {
@@ -1470,7 +3058,7 @@ local initSuccess = safeCall("Initialization", function()
 		loadingFill.BackgroundColor3 = getAccent().accent
 	end)
 
-	runStep("Binding interactions & camera...", 0.60, function()
+	runStep("Binding interactions, aim & esp...", 0.60, function()
 		bindInteractions()
 	end)
 
@@ -1479,7 +3067,25 @@ local initSuccess = safeCall("Initialization", function()
 		broadcastLanguage()
 		syncAnimToggle()
 		syncCompactToggle()
+		syncAimToggle()
+		syncSmoothToggle()
+		syncPredictToggle()
+		syncLosToggle()
+		syncShowFovToggle()
+		syncEspToggle()
+		syncEspBoxToggle()
+		syncEspNameToggle()
+		syncEspHealthToggle()
+		syncEspSkeletonToggle()
+		syncEspTracerToggle()
+		syncEspTeamToggle()
+		syncRegionButtons()
+		syncTargetButtonText()
+		refreshDashboardEspStatus()
 		applyScale(State.uiScale, false)
+		applyFovValue(State.fov, false)
+		applySmoothValue(State.smoothness, false)
+		applyEspDistValue(State.espMaxDistance, false)
 		root.Size = UDim2.fromOffset(BASE_WIDTH, getTargetHeight())
 		showTab("Dashboard")
 	end)
